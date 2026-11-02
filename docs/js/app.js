@@ -432,7 +432,7 @@
     $('planOut').textContent = 'Nothing can be written yet:\n\n' + checks.map(c => `${c.ok ? '✓' : '✗'} ${c.text}`).join('\n');
     $('btnExecWrite').disabled = true;
     $('planNote').textContent = 'Fix the ✗ items, then press Write again. See Tools → Mapping workbench for mapping and the write template.';
-    $('writeModal').hidden = false;
+    openWriteModal();
   }
   $('btnWrite').onclick = guard(async () => {
     if (st.reader && !st.rc.length) {
@@ -488,9 +488,21 @@
     $('planNote').textContent = !parts.length ? '' : (!bin && !st.map.writeTemplate) ? 'Writing is disabled until a write template is set.'
       : !st.map.writeValidated ? (bin ? 'Writing is disabled until you confirm the read values match the vendor utility (Tools → Mapping workbench).' : 'Writing is disabled until the template is marked as validated.')
       : 'After writing, the reader is re-read and every changed byte is verified.';
-    $('writeModal').hidden = false;
+    openWriteModal();
   });
   $('chkEeprom').onchange = () => { if (!$('writeModal').hidden) $('btnWrite').click(); };
+  // The "map verified" box is mirrored in the write dialog; both drive st.map.writeValidated.
+  function openWriteModal() {
+    $('chkVerified').checked = !!st.map.writeValidated;
+    $('verLabel').textContent = $('valLabel').textContent;
+    $('writeModal').hidden = false;
+  }
+  $('chkVerified').onchange = () => {
+    $('fmValidated').checked = $('chkVerified').checked;
+    $('fmValidated').onchange();
+    $('chkVerified').checked = !!st.map.writeValidated;
+    $('btnWrite').click(); // re-plan so the Write button reflects the new state
+  };
   $('btnPlanCancel').onclick = () => { $('writeModal').hidden = true; };
   $('btnExecWrite').onclick = guard(async () => {
     const plan = st.plan; const r = need();

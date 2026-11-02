@@ -181,3 +181,5 @@ details summary{cursor:pointer;color:var(--acc);margin:8px 0}
   .status #stRight{width:auto}
   .fab,.fabmenu{position:fixed}
 }
+
+#eeRow,#verRow{display:flex;margin:6px 0}
