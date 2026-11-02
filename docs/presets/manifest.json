@@ -1,0 +1,72 @@
+[
+ {
+  "file": "CasiPanel_With_HIDCorp_1000Card.hwg",
+  "label": "CasiPanel With HIDCorp 1000Card",
+  "template": false
+ },
+ {
+  "file": "Casi_Card.hwg",
+  "label": "Casi Card",
+  "template": false
+ },
+ {
+  "file": "Corp_1000.hwg",
+  "label": "Corp 1000",
+  "template": false
+ },
+ {
+  "file": "EM_Reader_1.hwg",
+  "label": "EM Reader 1",
+  "template": false
+ },
+ {
+  "file": "FTVSE_Create_User.hwg+",
+  "label": "FTVSE Create User",
+  "template": true
+ },
+ {
+  "file": "FTVSE_Logon.hwg+",
+  "label": "FTVSE Logon",
+  "template": true
+ },
+ {
+  "file": "GE_Mifare10.hwg",
+  "label": "GE Mifare10",
+  "template": false
+ },
+ {
+  "file": "GE_Mifare12.hwg",
+  "label": "GE Mifare12",
+  "template": false
+ },
+ {
+  "file": "GE_Vicinity16.hwg",
+  "label": "GE Vicinity16",
+  "template": false
+ },
+ {
+  "file": "HID_26Bit_FAC_ID.hwg",
+  "label": "HID 26Bit FAC ID",
+  "template": false
+ },
+ {
+  "file": "HID_26Bit_ID_Only.hwg",
+  "label": "HID 26Bit ID Only",
+  "template": false
+ },
+ {
+  "file": "HID_26Bit_ID_Only.hwg+",
+  "label": "HID 26Bit ID Only",
+  "template": true
+ },
+ {
+  "file": "RDR-6084AKU_Emulation.hwg+",
+  "label": "RDR-6084AKU Emulation",
+  "template": true
+ },
+ {
+  "file": "hID_10313.hwg",
+  "label": "hID 10313",
+  "template": false
+ }
+]
