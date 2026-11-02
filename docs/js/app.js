@@ -473,7 +473,7 @@
         lines.push(`  settings: ${plan.applied.map(k => `${k} ${rc.vals[k]} → ${changed[k]}`).join(', ')}`);
         plan.diffs.forEach(d => lines.push(`  ${bin ? `page ${Math.floor(d.byte / 8)} pos ${d.byte % 8}` : `byte ${d.byte}`}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
       }
-      const reps = [...(st.plus ? [PCX.toHex(PCX.binCmd(PCX.BIN.selectConfig(i))) + '   (select configuration)'] : []), ...pre.map(r => PCX.toHex(r)), ...(plan ? plan.commands : [])];
+      const reps = [...(st.plus ? [PCX.toHex(PCX.binCmd(PCX.BIN.selectConfig(i))) + '   (select configuration)'] : []), ...pre.map(r => PCX.toHex(r)), ...(plan ? plan.commands : [PCX.toHex(PCX.binCmd([PCX.BIN.FINISH, 0]))])];
       if (!bin && !st.map.writeTemplate) lines.push('  (no commands — set a write template in Tools → Mapping workbench)');
       reps.forEach(c => lines.push(`    ${c}${bin ? '' : '<CR>'}`));
       lines.push('');
@@ -516,7 +516,7 @@
     for (const p of plan.parts) {
       if (isBin()) {
         if (st.plus) await selectConfig(p.i);
-        const reps = [...p.pre, ...(p.plan ? p.plan.reports : [])];
+        const reps = [...p.pre, ...(p.plan ? p.plan.reports : [PCX.binCmd([PCX.BIN.FINISH, 0])])];
         await r.binSequence(reps);
         reps.forEach(x => log(`WRITE cfg ${p.i + 1}: ${PCX.toHex(x)}`));
       } else for (const c of p.plan.commands) {
@@ -724,7 +724,9 @@
         reps.push(PCX.binCmd([x.code]), PCX.binCmd(x.want));
         if (x.code <= 0x83) mask |= 1 << (x.code - 0x80);
       }
-      if (mask) reps.push(PCX.binCmd([PCX.BIN.FINISH, $('chkDumpEeprom').checked ? mask : 0]));
+      // Always finish with 90 (as pcProxAPI.dll's WriteCfg does), even when only page 84 changed;
+      // without it the reader does not apply the card-type/priority page.
+      reps.push(PCX.binCmd([PCX.BIN.FINISH, $('chkDumpEeprom').checked ? mask : 0]));
       await r.binSequence(reps);
       reps.forEach(x => log(`RESTORE cfg ${i + 1}: ${PCX.toHex(x)}`));
     }

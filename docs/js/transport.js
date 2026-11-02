@@ -236,7 +236,7 @@
       // ---- binary protocol ----
       const cfg = this.banks[1][this.active];
       if (this.sel != null) {
-        if (this.sel === 4) { cfg.ct = bytes[1] | (bytes[2] << 8); cfg.prio = bytes[3] & 1; }
+        if (this.sel === 4) { cfg.pend4 = { ct: bytes[1] | (bytes[2] << 8), prio: bytes[3] & 1 }; } // applied on 0x90, like the real RDR-805x
         else cfg.pages[this.sel] = bytes.slice(0, 8);
         this.sel = null; this.pending = new Uint8Array(this.reportLen); return;
       }
@@ -251,9 +251,9 @@
         else if (c === 0x8C && bytes[1] === 0x06) o.set([0x8C, 0x06, this.volume]);
         else if (c === 0x8C && bytes[1] === 0x86) { this.volume = bytes[2] & 3; o.set([0x8C, 0x86]); }
         else if (c === 0x89 && bytes[1] === 0x01) o.set([0x89, 0x01, this.active, this.banks[1].length]);
-        else if (c === 0x89 && bytes[1] === 0x81) { if (bytes[2] < this.banks[1].length) this.active = bytes[2]; o.set([0x89, 0x81, this.active]); }
+        else if (c === 0x89 && bytes[1] === 0x81) { delete cfg.pend4; if (bytes[2] < this.banks[1].length) this.active = bytes[2]; o.set([0x89, 0x81, this.active]); }
         else if (c === 0x89 && bytes[1] === 0x82) { const a = bytes[2], b = bytes[3]; if (this.banks[a] && b !== 3 && this.banks[b]) this.banks[b] = this._cloneBank(this.banks[a]); o.set([0x89, 0x82]); }
-        else if (c === 0x90) { if (bytes[1] & 0x07) this.banks[2] = this._cloneBank(this.banks[1]); }
+        else if (c === 0x90) { if (cfg.pend4) { cfg.ct = cfg.pend4.ct; cfg.prio = cfg.pend4.prio; delete cfg.pend4; } if (bytes[1] & 0x0F) this.banks[2] = this._cloneBank(this.banks[1]); }
         this.pending = o; return;
       }
       const cmd = PCX.decodeReply(bytes).text.toUpperCase();
