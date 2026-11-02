@@ -1,13 +1,13 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let token = '', base = '', original = {}, current = {};
+let base = '', original = {}, current = {};
 
 const log = (m, bad) => { const l = $('log'); l.textContent = `[${new Date().toLocaleTimeString()}] ${bad ? 'ERROR ' : ''}${m}\n` + l.textContent; };
 
 async function api(method, path, body) {
   const r = await fetch(base + path, {
     method,
-    headers: { 'Content-Type': 'application/json', 'X-Helper-Token': token },
+    headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
   const j = await r.json().catch(() => ({}));
@@ -18,12 +18,10 @@ const guard = fn => async (...a) => { try { await fn(...a); } catch (e) { log(e.
 
 // ---- pairing ----
 $('btnPair').onclick = guard(async () => {
-  token = $('code').value.trim().toUpperCase();
   base = `http://127.0.0.1:${$('port').value.trim()}`;
   $('pairMsg').textContent = 'Connecting…';
   try {
     const s = await api('GET', '/status');
-    if (!s.paired) throw new Error('Wrong pairing code');
     $('conn').textContent = 'Helper: connected' + (s.mock ? ' (mock)' : '');
     $('conn').className = 'pill on';
     $('pairMsg').textContent = '';
@@ -32,10 +30,19 @@ $('btnPair').onclick = guard(async () => {
     loadPresets(); await scan();
   } catch (e) {
     $('pairMsg').textContent = e.message === 'Failed to fetch'
-      ? 'Cannot reach helper. Is start-helper.bat running, and is this site\'s origin in helper-config.json?' : e.message;
-    throw e;
+      ? 'Waiting for helper… run start-helper.bat and keep its window open (retrying automatically). If it is running, check that this site\'s origin is in helper-config.json.' : e.message;
   }
 });
+
+// auto-connect on load, and retry every 3s until the helper is running
+(function autoConnect() {
+  const tryOnce = async () => {
+    if (!$('devs').hidden) return;
+    try { $('btnPair').onclick(); } catch (_) {}
+  };
+  tryOnce();
+  setInterval(tryOnce, 3000);
+})();
 
 // ---- WebHID detection (read-only) ----
 $('btnHid').onclick = guard(async () => {
