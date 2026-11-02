@@ -182,6 +182,17 @@
             <div id="presetWarn" class="banner warn" hidden></div>
             <div class="tablewrap"><table id="presetTable" class="data"><thead><tr><th>Setting</th><th>File</th><th>Reader</th><th>Writable</th></tr></thead><tbody></tbody></table></div>
           </div>
+          <h3 class="mt">Vendor raw dump</h3>
+          <p class="muted small">Open a file from the vendor utility's <b>+ → Save USB device hex raw data to (SDK) file</b> to compare it with the reader byte by byte, and optionally write the dump's exact configuration back (pages 80–84 per configuration).</p>
+          <div class="row"><label class="btn">Open raw dump (.txt)…<input type="file" id="dumpIn" accept=".txt,.log" hidden></label></div>
+          <div id="dumpView" hidden>
+            <p id="dumpMeta" class="muted small"></p>
+            <div class="tablewrap"><table id="dumpTable" class="data"><thead><tr><th>Cfg</th><th>Page</th><th>Dump</th><th>Reader</th><th>Settings that differ</th></tr></thead><tbody></tbody></table></div>
+            <div class="row mt">
+              <button id="btnDumpWrite" class="btn danger" disabled>Write dump to reader</button>
+              <label class="inline small"><input type="checkbox" id="chkDumpEeprom" checked> Save to EEPROM</label>
+            </div>
+          </div>
           <div class="row mt">
             <button id="btnExportHwg" class="btn">Export active slot as .hwg+</button>
             <button id="btnExportCapture" class="btn">Export raw capture (.json)</button>

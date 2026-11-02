@@ -89,7 +89,7 @@
   const fabActions = {
     open: () => { $('presetSlot').value = String(st.active); $('fileIn').click(); },
     save: () => exportHwg(true),
-    raw: () => exportCapture(),
+    raw: () => exportVendorDump(),
   };
   $$('#fabMenu [data-f]').forEach(b => b.onclick = guard(() => { fab(false); return fabActions[b.dataset.f] && fabActions[b.dataset.f](); }));
 
@@ -306,13 +306,14 @@
       for (let i = 0; i < n; i++) {
         if (st.plus) await selectConfig(i);
         const block = await readPages();
-        let cardType = null, prio = 0;
+        let cardType = null, prio = 0, p4 = null;
+        const p3 = await r.bin([PCX.BIN.PAGE(3)]);
         if (st.plus) {
-          const p4 = await r.bin([PCX.BIN.PAGE(4)]);
+          p4 = await r.bin([PCX.BIN.PAGE(4)]);
           cardType = p4[1] | (p4[2] << 8); prio = p4[3] & 1;
         }
-        st.rc.push({ block, cardType, prio });
-        log(`Config ${i + 1}${cardType != null ? ` (${cardTypeName(cardType)}${prio ? ', high priority' : ''})` : ''}: ${PCX.toHex(block.slice(0, 8))} | ${PCX.toHex(block.slice(8, 16))} | ${PCX.toHex(block.slice(16))}`);
+        st.rc.push({ block, cardType, prio, p3, p4 });
+        log(`Config ${i + 1}${cardType != null ? ` (${cardTypeName(cardType)}, flag ${prio})` : ''}: ${PCX.toHex(block.slice(0, 8))} | ${PCX.toHex(block.slice(8, 16))} | ${PCX.toHex(block.slice(16))}`);
       }
       if (st.plus) await selectConfig(st.plus.active);
     }
@@ -323,9 +324,9 @@
       if (!sl.src || sl.src === 'reader') st.slots[i] = readerSlot(i);
       else for (const [k, v] of Object.entries(c.vals)) if (!(k in sl.targets)) sl.targets[k] = v;
     });
-    const hp = st.rc.findIndex(c => c.prio);
-    if (hp >= 0) st.priority = hp + 1;
-    renderQrz(); renderSlots(); renderSettings(); renderPresetTable();
+    // Page 84 byte 3 is 1 on every configuration of the user's RDR-805x, so it is not a single
+    // "high priority" marker; it is preserved as read and the High Priority selector is file-only.
+    renderQrz(); renderSlots(); renderSettings(); renderPresetTable(); if (st.dump) renderDump();
     log(`Read ${st.rc.length} configuration(s), ${Object.keys(st.rc[0].vals).length} mapped setting(s) each`);
     status(`Read ${st.rc.length} configuration(s)`);
   }
@@ -365,7 +366,7 @@
     $('selPrio').value = String(st.priority);
     $$('.slotlbl').forEach(el => el.textContent = `— configuration ${st.active + 1}${slot().label ? `: ${slot().label}` : ' (empty)'}${st.active >= Math.max(1, st.rc.length) ? ' · not on this reader' : ''}`);
   }
-  $('selPrio').onchange = () => { st.priority = Number($('selPrio').value); log(`High priority card: configuration ${st.priority}`); };
+  $('selPrio').onchange = () => { st.priority = Number($('selPrio').value); log(`High priority card (saved to .hwg+ files only): configuration ${st.priority}`); };
   function setSlot(i, src) {
     if (!src) { st.slots[i] = newSlot(); return; }
     if (src === 'reader') { st.slots[i] = st.rc[i] ? readerSlot(i) : { ...newSlot(), src, label: 'Reader configuration', targets: {} }; return; }
@@ -458,14 +459,16 @@
       const changed = {};
       for (const [k, v] of Object.entries(sl.targets)) if (fieldsFor(k).length && rc.vals[k] !== undefined && Number(v) !== Number(rc.vals[k])) changed[k] = v;
       const wantCt = st.plus && sl.cardType != null ? sl.cardType : rc.cardType;
-      const wantPrio = st.plus ? (st.priority === i + 1 ? 1 : 0) : rc.prio;
-      const ctChange = !!st.plus && (wantCt !== rc.cardType || wantPrio !== rc.prio);
+      const wantPrio = rc.prio; // preserved: meaning of page 84 byte 3 unconfirmed (vendor sets 1 on all configs)
+      const ctChange = !!st.plus && wantCt !== rc.cardType;
       if (!Object.keys(changed).length && !ctChange) continue;
       const plan = !Object.keys(changed).length ? null : bin ? PCX.planBinWrite(st.map, rc.block, changed, $('chkEeprom').checked) : PCX.planWrite(st.map, rc.block, changed);
-      const pre = ctChange ? [PCX.binCmd([PCX.BIN.PAGE(PCX.BIN.CARD_PAGE)]), PCX.binCmd([0, wantCt & 0xFF, (wantCt >> 8) & 0xFF, wantPrio])] : [];
+      const p4 = rc.p4 ? Uint8Array.from(rc.p4) : PCX.binCmd([0, 0, 0, wantPrio]);
+      p4[1] = wantCt & 0xFF; p4[2] = (wantCt >> 8) & 0xFF;
+      const pre = ctChange ? [PCX.binCmd([PCX.BIN.PAGE(PCX.BIN.CARD_PAGE)]), p4] : [];
       parts.push({ i, plan, pre, wantCt, wantPrio });
       lines.push(`Configuration ${i + 1}${st.plus ? ` (${cardTypeName(rc.cardType)})` : ''}:`);
-      if (ctChange) lines.push(`  card type ${cardTypeName(rc.cardType)}${rc.prio ? ' [high]' : ''} → ${cardTypeName(wantCt)}${wantPrio ? ' [high]' : ''}`);
+      if (ctChange) lines.push(`  card type ${cardTypeName(rc.cardType)} → ${cardTypeName(wantCt)}`);
       if (plan) {
         lines.push(`  settings: ${plan.applied.map(k => `${k} ${rc.vals[k]} → ${changed[k]}`).join(', ')}`);
         plan.diffs.forEach(d => lines.push(`  ${bin ? `page ${Math.floor(d.byte / 8)} pos ${d.byte % 8}` : `byte ${d.byte}`}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
@@ -528,7 +531,7 @@
     for (const p of plan.parts) {
       const rc = st.rc[p.i];
       if (p.plan) p.plan.diffs.forEach(d => { if (rc.block[d.byte] !== p.plan.next[d.byte]) bad.push(`cfg ${p.i + 1} byte ${d.byte} (want ${PCX.hex2(p.plan.next[d.byte])}, got ${PCX.hex2(rc.block[d.byte] ?? 0)})`); });
-      if (p.pre.length && (rc.cardType !== p.wantCt || rc.prio !== p.wantPrio)) bad.push(`cfg ${p.i + 1} card type/priority`);
+      if (p.pre.length && rc.cardType !== p.wantCt) bad.push(`cfg ${p.i + 1} card type`);
     }
     $('writeModal').hidden = true;
     if (bad.length) log(`Verify FAILED: ${bad.join(', ')}`, 'err');
@@ -660,6 +663,80 @@
     $('presetTable').tBodies[0].innerHTML = rows.concat(unk).join('');
   }
 
+  // ---------- vendor raw dump: compare and restore ----------
+  const DUMP_PAGES = [0x80, 0x81, 0x82, 0x83, 0x84];
+  $('dumpIn').onchange = guard(async () => {
+    const f = $('dumpIn').files[0]; if (!f) return;
+    st.dump = PCX.parseRawDump(await f.text()); st.dump.name = f.name; $('dumpIn').value = '';
+    log(`Loaded raw dump ${f.name}: ${st.dump.readerType || 'reader'}, ${st.dump.configs.length} configuration(s)`);
+    if (st.reader && !st.rc.length) { try { await readConfig(); } catch (e) { log(e.message, 'err'); } }
+    renderDump();
+  });
+  function readerPage(i, code) {
+    const rc = st.rc[i]; if (!rc) return null;
+    if (code <= 0x82) return rc.block ? rc.block.slice((code - 0x80) * 8, (code - 0x80) * 8 + 8) : null;
+    if (code === 0x83) return rc.p3 || null;
+    if (code === 0x84) return rc.p4 || null;
+    return null;
+  }
+  function dumpDiffs() {
+    const out = [];
+    if (!st.dump) return out;
+    for (const c of st.dump.configs) for (const code of DUMP_PAGES) {
+      const want = c.pages[code]; if (!want) continue;
+      const have = readerPage(c.index, code);
+      const differs = !have || PCX.toHex(have) !== PCX.toHex(want);
+      out.push({ cfg: c.index, code, want, have, differs });
+    }
+    return out;
+  }
+  function renderDump() {
+    $('dumpView').hidden = !st.dump;
+    if (!st.dump) return;
+    const d = dumpDiffs(), n = d.filter(x => x.differs).length;
+    $('dumpMeta').textContent = `${st.dump.name} · ${st.dump.readerType || ''} · ${st.dump.configs.length} configuration(s) · ${st.rc.length ? `${n} page(s) differ from the reader` : 'connect and read the reader to compare'}`;
+    const setDiff = x => {
+      if (x.code > 0x82 || !x.have) return '';
+      const a = new Uint8Array(24), b = new Uint8Array(24), off = (x.code - 0x80) * 8;
+      a.set(x.have, off); b.set(x.want, off);
+      const va = valsOf(a), vb = valsOf(b);
+      return Object.keys(vb).filter(k => st.map.fields.some(f => f.key === k && f.cmd === 'CFG' && Math.floor(f.byte / 8) === x.code - 0x80) && va[k] !== vb[k]).map(k => `${k} ${va[k]}→${vb[k]}`).join(', ');
+    };
+    $('dumpTable').tBodies[0].innerHTML = d.map(x => `<tr class="${x.differs && st.rc.length ? 'chg' : ''}"><td>${x.cfg + 1}</td><td class="mono">${PCX.hex2(x.code)}</td>
+      <td class="mono">${PCX.toHex(x.want)}</td><td class="mono">${x.have ? PCX.toHex(x.have) : '—'}</td>
+      <td class="small">${x.code === 0x84 ? esc(cardTypeName(x.want[1] | (x.want[2] << 8))) : esc(setDiff(x))}</td></tr>`).join('');
+    $('btnDumpWrite').disabled = !(st.reader && isBin() && st.rc.length && n);
+  }
+  $('btnDumpWrite').onclick = guard(async () => {
+    const r = need();
+    if (!isBin()) throw new Error('Switch to the 8-byte protocol first');
+    const d = dumpDiffs().filter(x => x.differs && x.cfg < st.rc.length);
+    if (!d.length) return log('Reader already matches the dump');
+    const byCfg = {};
+    d.forEach(x => (byCfg[x.cfg] = byCfg[x.cfg] || []).push(x));
+    const summary = Object.entries(byCfg).map(([c, xs]) => `config ${Number(c) + 1}: pages ${xs.map(x => PCX.hex2(x.code)).join(', ')}`).join('\n');
+    if (!confirm(`Write the dump's exact bytes to ${r.name}?\n\n${summary}\n\nThese readers control physical access.`)) return;
+    for (const [c, xs] of Object.entries(byCfg)) {
+      const i = Number(c);
+      if (st.plus) await selectConfig(i);
+      const reps = []; let mask = 0;
+      for (const x of xs) {
+        reps.push(PCX.binCmd([x.code]), PCX.binCmd(x.want));
+        if (x.code <= 0x83) mask |= 1 << (x.code - 0x80);
+      }
+      if (mask) reps.push(PCX.binCmd([PCX.BIN.FINISH, $('chkDumpEeprom').checked ? mask : 0]));
+      await r.binSequence(reps);
+      reps.forEach(x => log(`RESTORE cfg ${i + 1}: ${PCX.toHex(x)}`));
+    }
+    if (st.plus) await selectConfig(st.plus.active);
+    st.slots.forEach((sl, i) => { if (i < st.rc.length) st.slots[i] = newSlot(); });
+    await readConfig();
+    const left = dumpDiffs().filter(x => x.differs && x.cfg < st.rc.length);
+    renderDump();
+    if (left.length) log(`Restore verify: ${left.length} page(s) still differ (${left.map(x => `cfg ${x.cfg + 1} ${PCX.hex2(x.code)}`).join(', ')})`, 'err');
+    else { log('Restore verified: the reader matches the dump'); status('Reader matches the dump'); r.bin(PCX.BIN.beep(1, false)).catch(() => {}); }
+  });
+
   const download = (name, text, type = 'text/plain') => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type }));
@@ -692,9 +769,36 @@
       tool: 'pcProx Portal (WebHID)', time: new Date().toISOString(),
       device: { name: r.name, vidpid: r.vidpid, kind: r.kind, reportId: r.reportId, reportLen: r.reportLen, collections: r.describe() },
       firmware: st.fw, qrz: st.qrz ? PCX.toHex(st.qrz, '') : null,
+      configs: st.rc.map((c, i) => ({ config: i + 1, cardType: c.cardType != null ? Number(c.cardType).toString(16).toUpperCase().padStart(4, '0') : null,
+        pages: { '80': c.block && PCX.toHex(c.block.slice(0, 8)), '81': c.block && PCX.toHex(c.block.slice(8, 16)), '82': c.block && PCX.toHex(c.block.slice(16, 24)),
+          '83': c.p3 ? PCX.toHex(c.p3) : null, '84': c.p4 ? PCX.toHex(c.p4) : null } })),
       snapshots: st.snapshots.map(s => ({ label: s.label, cmd: s.cmd, time: s.time, reply: s.text, hex: PCX.toHex(s.bytes, '') })), map: st.map,
     }, null, 2), 'application/json');
     status('Saved raw capture');
+  }
+  // Same procedure and file format as the vendor utility's "Save USB device hex raw data to (SDK) file":
+  // for each configuration, select it and query 80 81 82 83 84 85 87 88 89 8A 8B 8C 8D 8E 8F.
+  async function exportVendorDump() {
+    const r = need();
+    if (!isBin()) throw new Error('The raw dump uses the 8-byte protocol');
+    if (!st.rc.length) await readConfig();
+    const codes = [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F];
+    const L = ['# 8 byte USB Feature Reports', `# Reader Type ${st.plus ? 'PcProxPlus' : 'PcProx'}`];
+    const n = st.plus ? st.plus.count : 1;
+    status('Dumping feature reports…');
+    for (let i = 0; i < n; i++) {
+      if (st.plus) await selectConfig(i);
+      if (st.plus) L.push(`# Configuration ${i + 1}`);
+      for (const c of codes) {
+        const tx = PCX.binCmd([c]);
+        const rx = await r.bin(tx);
+        L.push(`Tx: ${PCX.toHex(tx)} `, `Rx: ${PCX.toHex(rx)} `);
+      }
+    }
+    if (st.plus) await selectConfig(st.plus.active);
+    L.push('# End');
+    download(`portal-dump-${r.vidpid.replace(':', '-')}-${Date.now()}.txt`, L.join('\r\n') + '\r\n');
+    log(`Saved raw dump (${n} configuration(s)) in the vendor utility's format`); status('Saved raw dump');
   }
   const exportMap = () => download(`fieldmap-${st.map.vidpid.replace(':', '-')}.json`, JSON.stringify(st.map, null, 2), 'application/json');
   $('btnExportHwg').onclick = guard(() => exportHwg(false));
@@ -877,6 +981,6 @@
 
   applyProtocol(false);
   loadLibrary();
-  window.PCX_STATE = st; // for troubleshooting from the browser console
+  window.PCX_STATE = st; window.PCX_ACTIONS = fabActions; // for troubleshooting from the browser console
   log('Portal ready. Connect a reader, or try the simulated reader.');
 })();

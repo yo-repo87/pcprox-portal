@@ -209,9 +209,15 @@
       this.pending = new Uint8Array(this.reportLen);
       // binary protocol state: pages 0..2 (an H10301 26-bit setup), EEPROM copy, selected page, card buffers
       // pcProx Plus-like: 4 configurations (card types as on the user's RDR-805x), each with pages 0..2
-      const base = () => [Uint8Array.from([3, 5, 0x11, 16, 26, 0xB3, 0x28, 0x1D]), Uint8Array.from([0, 20, 20, 24, 5, 5, 0x40, 0]), Uint8Array.from([0, 0x18, 0, 0, 0, 0, 0, 0])];
-      const mk = (ct, prio) => ({ pages: base(), ct, prio });
-      this.banks = { 1: [mk(0xEF01, 1), mk(0xF802, 0), mk(0xFC02, 0), mk(0xEA02, 0)] };
+      // Page values taken from the user's RDR-805x raw dump (vendor-programmed state).
+      const H = s => Uint8Array.from(s.split(' ').map(x => parseInt(x, 16)));
+      const mk = (p0, p1, p2, p3, ct) => ({ pages: [H(p0), H(p1), H(p2), H(p3)], ct, prio: 1 });
+      this.banks = { 1: [
+        mk('03 05 00 14 5D B3 28 10', '00 14 14 18 05 05 42 C0', '02 9A 00 00 00 00 00 00', '00 00 00 00 00 02 00 01', 0xEF01),
+        mk('03 0E 00 10 1A B3 28 11', '00 14 14 18 05 05 42 C0', '02 9A 00 00 00 00 00 00', '00 00 00 00 00 00 00 00', 0xF802),
+        mk('06 0A 11 13 28 00 28 0D', '00 14 14 18 05 05 40 C0', '00 98 00 00 00 00 00 00', '00 00 00 00 00 00 00 00', 0xFC02),
+        mk('01 10 11 10 1A B3 28 15', '00 14 14 18 05 05 40 C0', '00 98 00 00 00 00 00 00', '00 00 00 00 00 00 00 00', 0xEA02),
+      ] };
       this.banks[2] = this._cloneBank(this.banks[1]); this.banks[3] = this._cloneBank(this.banks[1]);
       this.active = 0; this.volume = 2;
       this.sel = null; this.cardData = new Uint8Array(8); this.cardBits = 0;
@@ -230,15 +236,15 @@
       // ---- binary protocol ----
       const cfg = this.banks[1][this.active];
       if (this.sel != null) {
-        if (this.sel === 4) { cfg.ct = bytes[1] | (bytes[2] << 8); cfg.prio = bytes[3] & 1; if (cfg.prio) this.banks[1].forEach(c => { if (c !== cfg) c.prio = 0; }); }
+        if (this.sel === 4) { cfg.ct = bytes[1] | (bytes[2] << 8); cfg.prio = bytes[3] & 1; }
         else cfg.pages[this.sel] = bytes.slice(0, 8);
         this.sel = null; this.pending = new Uint8Array(this.reportLen); return;
       }
       if (bytes[0] & 0x80) {
         const c = bytes[0], o = new Uint8Array(this.reportLen);
-        if (c >= 0x80 && c <= 0x82) { this.sel = c & 0x0F; o.set(cfg.pages[this.sel]); }
+        if (c >= 0x80 && c <= 0x83) { this.sel = c & 0x0F; o.set(cfg.pages[this.sel]); }
         else if (c === 0x84) { this.sel = 4; o.set([0, cfg.ct & 0xFF, cfg.ct >> 8, cfg.prio]); }
-        else if (c === 0x8A) o.set([0, 0, 0x90, 16, 0, 0x01, 0x00, 0]);       // fw 16.9.0, device type 1
+        else if (c === 0x8A) o.set([0, 0, 0x90, 0x16, 0, 0x01, 0x05, 0]);   // fw 16.9.0 (as in the user's dump)
         else if (c === 0x8F) o.set(this.cardData);
         else if (c === 0x8E) o.set([this.cardBits, this.cardBits]);
         else if (c === 0x8C && bytes[1] === 0x03) { this._beep(!!(bytes[2] & 0x80)); o.set([0x8C, 0x03]); }

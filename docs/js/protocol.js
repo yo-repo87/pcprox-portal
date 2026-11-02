@@ -163,8 +163,9 @@
   // Device info reply: [?, ?, {minor:4, release:4}, major, ?, deviceType(LE16), ?]
   PCX.decodeDevInfo = b => {
     if (!b || b.length < 7) return null;
+    // The vendor utility prints the major version byte in hex (0x16 -> "16.9.0"), so do the same.
     const major = b[3], rel = b[2] >> 4, minor = b[2] & 0x0F;
-    return { firmware: `${String(major).padStart(2, '0')}.${rel}.${minor}`, deviceType: b[5] | (b[6] << 8) };
+    return { firmware: `${major.toString(16).toUpperCase().padStart(2, '0')}.${rel}.${minor}`, majorDec: major, deviceType: b[5] | (b[6] << 8) };
   };
 
   // Built-in field map for the binary protocol. Block = pages 0,1,2 concatenated (byte = page*8 + pos).
@@ -207,6 +208,27 @@
     if (!shift) return k;
     if (k.length === 1 && /[a-z]/.test(k)) return k.toUpperCase();
     return SHIFTED[k] ?? `Shift+${k}`;
+  };
+
+  // Parse the vendor utility's "Save USB device hex raw data to (SDK) file" output.
+  // Returns { readerType, configs: [{ index, pages: { 0x80: Uint8Array(8), ... } }] }
+  PCX.parseRawDump = text => {
+    const out = { readerType: null, configs: [] };
+    let cur = null, lastTx = null;
+    for (const raw of String(text).replace(/\r/g, '').split('\n')) {
+      const line = raw.trim();
+      let m;
+      if ((m = line.match(/^#\s*Reader Type\s+(\S+)/i))) out.readerType = m[1];
+      else if ((m = line.match(/^#\s*Configuration\s+(\d+)/i))) { cur = { index: Number(m[1]) - 1, pages: {} }; out.configs.push(cur); }
+      else if ((m = line.match(/^Tx:\s*(.*)$/i))) lastTx = PCX.hexToBytes(m[1]);
+      else if ((m = line.match(/^Rx:\s*(.*)$/i)) && lastTx) {
+        if (!cur) { cur = { index: 0, pages: {} }; out.configs.push(cur); }
+        cur.pages[lastTx[0]] = PCX.hexToBytes(m[1]).slice(0, 8);
+        lastTx = null;
+      }
+    }
+    if (!out.configs.length) throw new Error('No "Tx:/Rx:" feature reports found — is this a raw-data dump from the vendor utility?');
+    return out;
   };
 
   // ---------- Card ID helpers ----------

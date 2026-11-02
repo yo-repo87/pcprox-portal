@@ -73,3 +73,16 @@ Still untested on real hardware: these come from the DLL's code paths, not from 
 ## Browser limitation
 
 0C27:3BFA presents itself as a USB keyboard. Chrome and Edge block WebHID access to keyboard interfaces. If the reader has no other (vendor-defined) interface, it will not appear in the browser's picker at all, whatever the protocol. This is a browser rule and can only be confirmed by trying.
+
+## Verified against your reader's raw dump (noname.txt)
+
+The vendor utility's dump of the RDR-805x confirms the 8-byte protocol:
+
+- **Configurations:** 4. Card types read from page 84 are `01 EF`, `02 F8`, `02 FC` and `02 EA` (EF01 / F802 / FC02 / EA02), matching Smartcard Manager.
+- **Page 0 layout:** consistent with the built-in map. For example, config 3 (CASI) is FAC 6 digits, ID 10 digits, parity 1/1, ID bits 19, total 40, fixed length + strip FAC + send FAC.
+- **Firmware:** `8A` returns major byte `0x16`. The vendor prints it in hex ("16.9.0"); 22 decimal is the same number. The portal now shows 16.9.0.
+- **Page 84 byte 3:** this is `01` on all four configurations, so it is not a single "high priority" marker. Portal writes before this fix set it to 0 on configs 2–4. It is now always preserved as read, and the High Priority Card selector only affects exported .hwg+ files.
+- **Not covered by the settings map:**
+  - Config 1 has data in page 83: `00 00 00 00 00 02 00 01`.
+  - Page 81 byte 7 is `C0` on every config.
+  - The portal preserves these bytes on writes, and the raw-dump restore writes them exactly.
