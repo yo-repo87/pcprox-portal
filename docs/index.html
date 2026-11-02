@@ -3,66 +3,234 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pcProx Reader Portal</title>
+<title>pcProx WebHID Portal</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
-  <h1>pcProx Reader Portal</h1>
-  <div id="conn" class="pill off">Helper: not connected</div>
+  <div>
+    <h1>pcProx WebHID Portal</h1>
+    <div class="sub">Program rf IDeas readers straight from the browser — no helper, no install</div>
+  </div>
+  <div id="conn" class="pill off">No reader</div>
 </header>
 
 <main>
-  <section class="card" id="pair">
-    <h2>1. Connect to local helper</h2>
-    <p class="muted">Run <code>start-helper.bat</code> on this PC and keep its window open. This page connects automatically. Use Chrome or Edge.</p>
+  <div id="envWarn" class="banner bad" hidden></div>
+
+  <!-- 1. Connect -->
+  <section class="card">
+    <h2><span class="n">1</span>Connect a reader</h2>
+    <p class="muted">Uses WebHID (Chrome or Edge, served over https or localhost). The browser only lists readers that expose a vendor-defined HID interface — a reader in pure keyboard-wedge mode will not appear until it is switched to a vendor / HID-CDC mode.</p>
     <div class="row">
-      <input id="port" value="8765" size="5" title="Helper port">
-      <button id="btnPair">Connect now</button>
+      <button id="btnConnect">Connect reader…</button>
+      <button id="btnSim" class="secondary">Use simulated reader</button>
+      <button id="btnDisconnect" class="secondary" disabled>Disconnect</button>
+      <button id="btnForget" class="ghost" disabled title="Revoke this site's permission for the reader">Forget device</button>
     </div>
-    <p id="pairMsg" class="muted"></p>
-    <details><summary>Browser USB detection (WebHID, read-only)</summary>
-      <p class="muted">Lists rf IDEAS USB devices the browser can see. Configuration is never written through this path.</p>
-      <button id="btnHid" class="secondary">Detect readers in browser</button>
-      <pre id="hidOut"></pre>
-    </details>
-  </section>
-
-  <section class="card" id="devs" hidden>
-    <h2>2. Reader</h2>
-    <div class="row"><button id="btnScan">Scan for readers</button><select id="devSel"></select></div>
-    <table id="devTable"><thead><tr><th>#</th><th>Part</th><th>Firmware</th><th>LUID</th><th>VID:PID</th></tr></thead><tbody></tbody></table>
-    <div class="row">
-      <button id="btnBeep" class="secondary">Beep</button>
-      <button id="btnId" class="secondary">Read card ID</button>
-      <button id="btnFw" class="secondary">Firmware info</button>
-    </div>
-    <pre id="info"></pre>
-  </section>
-
-  <section class="card" id="cfg" hidden>
-    <h2>3. Configure</h2>
-    <div class="tabs"><button data-t="presets" class="on">Presets &amp; files</button><button data-t="settings">Settings</button><button data-t="defaults">Defaults</button></div>
-
-    <div id="t-presets" class="tab">
-      <div class="row"><select id="presetSel"></select><button id="btnPreset">Program reader with preset</button></div>
-      <div class="row"><input type="file" id="file" accept=".hwg,.hwg+,.txt"><button id="btnFile">Program reader with file</button></div>
-      <div class="row"><button id="btnExport" class="secondary">Export reader config (.hwg)</button></div>
-    </div>
-
-    <div id="t-settings" class="tab" hidden>
-      <div class="row"><button id="btnRead" class="secondary">Read from reader</button><input id="filter" placeholder="Filter settings…"><button id="btnWrite">Write changed settings</button></div>
-      <div id="grid" class="grid"></div>
-    </div>
-
-    <div id="t-defaults" class="tab" hidden>
-      <p class="muted">These change the reader's stored configuration.</p>
-      <div class="row"><button id="btnSaveUser" class="secondary">Save current as user defaults</button><button id="btnFactory" class="danger">Reset to factory defaults</button></div>
+    <div id="devInfo" hidden>
+      <table class="kv">
+        <tr><th>Device</th><td id="diName"></td></tr>
+        <tr><th>VID:PID</th><td id="diVidPid"></td></tr>
+        <tr><th>Model family</th><td id="diModel"></td></tr>
+        <tr><th>HID collections</th><td id="diCols"></td></tr>
+        <tr><th>Report</th><td>
+          <label class="inline">Report ID <select id="selReportId"><option value="0">0</option><option value="1">1</option></select></label>
+          <label class="inline">Data length <input id="inReportLen" type="number" min="8" max="24" value="24" class="narrow"></label>
+          <span id="diReportNote" class="muted small"></span>
+        </td></tr>
+      </table>
     </div>
   </section>
 
-  <section class="card"><h2>Log</h2><pre id="log"></pre></section>
+  <!-- 2. Reader -->
+  <section class="card" id="secReader" hidden>
+    <h2><span class="n">2</span>Reader</h2>
+    <div class="cols">
+      <div>
+        <h3>Identify &amp; control</h3>
+        <div class="row">
+          <button id="btnVersion" class="secondary">Read version (QSV)</button>
+          <button id="btnUptime" class="secondary">Uptime (QUP)</button>
+          <button id="btnDevData" class="secondary">Device data (QDD)</button>
+        </div>
+        <div class="row">
+          <label class="inline">Short beep <select id="selBeepS"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+          <button id="btnBeepS" class="secondary">BS</button>
+          <label class="inline">Long beep <select id="selBeepL"><option>1</option><option>2</option></select></label>
+          <button id="btnBeepL" class="secondary">BL</button>
+        </div>
+        <pre id="readerOut" class="out"></pre>
+      </div>
+      <div>
+        <h3>Card reads</h3>
+        <div class="row">
+          <button id="btnCardListen" class="secondary">Start listening</button>
+          <button id="btnSimTap" class="secondary" hidden>Simulate tap</button>
+          <button id="btnCardClear" class="ghost">Clear</button>
+        </div>
+        <p class="muted small">Listens for input reports and, if a poll command is set in the workbench, polls it no faster than every 235 ms. A tap is held for iIDHoldTO so one tap reads as one event. The ID byte layout is model-specific — set it under Mapping workbench → Card ID layout.</p>
+        <table id="cardTable" class="data"><thead><tr><th>Time</th><th>Bits</th><th>ID (hex)</th><th>Decimal</th><th>FAC / ID</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. Configure -->
+  <section class="card" id="secConfig" hidden>
+    <h2><span class="n">3</span>Configure</h2>
+    <nav class="tabs" role="tablist">
+      <button data-t="settings" class="on">Settings</button>
+      <button data-t="presets">Presets &amp; files</button>
+      <button data-t="workbench">Mapping workbench</button>
+      <button data-t="console">Console</button>
+      <button data-t="secure">Secure data</button>
+    </nav>
+
+    <!-- Settings -->
+    <div id="t-settings" class="tab">
+      <div class="row">
+        <button id="btnReadCfg">Read configuration (QRZ)</button>
+        <input id="setFilter" placeholder="Filter settings…">
+        <label class="inline"><input type="checkbox" id="chkMappedOnly"> Mapped only</label>
+      </div>
+      <div id="qrzView" hidden>
+        <h3>QRZ block <span id="qrzLen" class="muted small"></span></h3>
+        <div id="qrzBytes" class="bytes"></div>
+        <details class="mt"><summary>Confirmed decode (bytes 0–4)</summary><table id="qrzConfirmed" class="data"></table></details>
+      </div>
+      <h3>Settings</h3>
+      <p class="muted small">Reader values appear only for settings that have a confirmed byte in the field map. Edit a target value, or load a preset, then plan and write.</p>
+      <div class="tablewrap"><table id="setTable" class="data"><thead><tr><th>Setting</th><th>Reader</th><th>Target</th><th>Map</th></tr></thead><tbody></tbody></table></div>
+      <div class="row mt">
+        <button id="btnPlan">Plan write</button>
+        <button id="btnResetTargets" class="ghost">Reset targets to reader</button>
+      </div>
+      <div id="planBox" hidden>
+        <h3>Write plan</h3>
+        <pre id="planOut" class="out"></pre>
+        <div class="row"><button id="btnExecWrite" class="danger" disabled>Write to reader</button><span id="planNote" class="muted small"></span></div>
+      </div>
+    </div>
+
+    <!-- Presets -->
+    <div id="t-presets" class="tab" hidden>
+      <div class="row">
+        <select id="presetSel"></select>
+        <button id="btnLoadPreset" class="secondary">Load preset</button>
+        <input type="file" id="fileIn" accept=".hwg,.hwg+,.txt">
+      </div>
+      <div id="presetView" hidden>
+        <div class="row"><strong id="presetName"></strong><span id="presetMeta" class="muted small"></span></div>
+        <div class="row" id="presetCfgRow" hidden><label class="inline">Configuration <select id="presetCfgSel"></select></label></div>
+        <div id="presetWarn" class="banner warn" hidden></div>
+        <div class="tablewrap"><table id="presetTable" class="data"><thead><tr><th>Setting</th><th>Preset</th><th>Reader</th><th>Writable</th></tr></thead><tbody></tbody></table></div>
+        <div class="row mt"><button id="btnApplyPreset">Apply preset to targets</button><span class="muted small">Then review on the Settings tab and plan the write.</span></div>
+      </div>
+      <h3 class="mt">Export</h3>
+      <div class="row">
+        <button id="btnExportHwg" class="secondary">Export targets as .hwg+</button>
+        <button id="btnExportCapture" class="secondary">Export raw capture (.json)</button>
+      </div>
+      <p class="muted small">The .hwg+ export contains reader values for mapped settings and preset/target values for the rest; unmapped settings are listed in the file header.</p>
+    </div>
+
+    <!-- Workbench -->
+    <div id="t-workbench" class="tab" hidden>
+      <div class="banner info">The reference confirms QRZ bytes 0–4 only. To program reliably, map each setting by diffing two captures: capture, change one setting with the vendor tool, capture again, then assign the changed byte(s). Validate the write template on a reader you can safely re-flash.</div>
+
+      <h3>1 · Snapshots</h3>
+      <div class="row">
+        <select id="snapCmd"><option>QRZ</option><option>QSV</option><option>QDD</option><option>QS0</option><option>QUP</option><option>GS0</option><option>GL0</option></select>
+        <input id="snapLabel" placeholder="Label, e.g. 'before: bBeepID=1'">
+        <button id="btnSnap">Capture</button>
+      </div>
+      <div class="tablewrap"><table id="snapTable" class="data"><thead><tr><th>A</th><th>B</th><th>Label</th><th>Cmd</th><th>Bytes</th><th></th></tr></thead><tbody></tbody></table></div>
+
+      <h3>2 · Diff A → B</h3>
+      <div id="diffOut" class="muted">Select snapshot A and B.</div>
+
+      <h3>3 · Assign a field</h3>
+      <div class="formgrid">
+        <label>Setting <select id="fmKey"></select></label>
+        <label>Byte <input id="fmByte" type="number" min="0" value="0"></label>
+        <label>Width <select id="fmWidth"><option value="1">1 byte</option><option value="2">2 bytes (big-endian)</option></select></label>
+        <label>Mask (hex) <input id="fmMask" value="FF"></label>
+        <label>Shift <input id="fmShift" type="number" min="0" max="15" value="0"></label>
+        <label>Note <input id="fmNote" placeholder="evidence, e.g. diff 3→4"></label>
+      </div>
+      <div class="row"><button id="btnAddField">Add to field map</button></div>
+      <div class="tablewrap"><table id="fieldTable" class="data"><thead><tr><th>Setting</th><th>Cmd</th><th>Byte</th><th>Width</th><th>Mask</th><th>Shift</th><th>Note</th><th></th></tr></thead><tbody></tbody></table></div>
+
+      <h3>4 · Write template</h3>
+      <p class="muted small">Placeholders: <code>{ADDR}</code> <code>{VAL}</code> — one command per changed byte; or <code>{OFFSET}</code> <code>{LEN}</code> <code>{DATA}</code> — contiguous runs chunked to fit a 24-byte report. All values are two-digit uppercase hex. Examples to test: <code>SL0{ADDR}{VAL}</code>, <code>FR{OFFSET}{DATA}</code>.</p>
+      <div class="row">
+        <input id="fmTemplate" class="wide" placeholder="(none — writing disabled)">
+        <label class="inline"><input type="checkbox" id="fmValidated"> I validated this template on a re-flashable reader</label>
+      </div>
+
+      <h3>5 · Card ID layout</h3>
+      <div class="formgrid">
+        <label>Bit-count byte (−1 = none) <input id="lyBits" type="number" min="-1" value="0"></label>
+        <label>ID start byte <input id="lyStart" type="number" min="0" value="1"></label>
+        <label>ID length (bytes) <input id="lyLen" type="number" min="1" max="24" value="8"></label>
+        <label>Byte order <select id="lyRev"><option value="0">big-endian</option><option value="1">reversed</option></select></label>
+        <label>Poll command (optional) <input id="lyPoll" placeholder="blank = input reports only"></label>
+      </div>
+
+      <h3>Map file</h3>
+      <div class="row">
+        <button id="btnSaveMap">Save map</button>
+        <button id="btnExportMap" class="secondary">Export map (.json)</button>
+        <label class="btnlike secondary">Import map<input type="file" id="mapFile" accept=".json" hidden></label>
+        <button id="btnClearMap" class="ghost">Clear map</button>
+        <span id="mapStatus" class="muted small"></span>
+      </div>
+    </div>
+
+    <!-- Console -->
+    <div id="t-console" class="tab" hidden>
+      <div class="row">
+        <input id="conCmd" class="wide mono" placeholder="ASCII command, e.g. QRZ (CR is appended)">
+        <button id="btnConSend">Send</button>
+      </div>
+      <div class="row" id="conQuick"></div>
+      <div class="row">
+        <input id="conRaw" class="wide mono" placeholder="Raw feature report data, hex (report id is separate)">
+        <button id="btnRawSend" class="secondary">SET + GET</button>
+        <button id="btnRawGet" class="secondary">GET only</button>
+      </div>
+      <details><summary>Timing</summary>
+        <div class="formgrid">
+          <label>Reads while waiting for ack <input id="tmPolls" type="number" min="1" max="50" value="10"></label>
+          <label>Delay between reads (ms) <input id="tmDelay" type="number" min="0" max="500" value="15"></label>
+          <label>Continuation reads (multi-report replies) <input id="tmCont" type="number" min="0" max="32" value="0"></label>
+        </div>
+      </details>
+      <pre id="conOut" class="out tall"></pre>
+    </div>
+
+    <!-- Secure -->
+    <div id="t-secure" class="tab" hidden>
+      <div class="banner warn">Secure-data channel (opcode 0x89). The frame layout is confirmed; response parsing is not, and the channel only works on one USB backend — other readers will simply not answer. Shown raw.</div>
+      <div class="row">
+        <label class="inline">Parameters (hex, address/block) <input id="secParams" class="mono" placeholder="e.g. 00 00 00"></label>
+        <button id="btnSecure" class="secondary">Send secure read</button>
+      </div>
+      <pre id="secOut" class="out"></pre>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row between"><h2>Log</h2><div class="row"><label class="inline"><input type="checkbox" id="chkWire" checked> Show wire bytes</label><button id="btnLogClear" class="ghost">Clear</button></div></div>
+    <pre id="log" class="out tall"></pre>
+  </section>
 </main>
-<script src="app.js"></script>
+
+<script src="js/protocol.js"></script>
+<script src="js/transport.js"></script>
+<script src="js/hwg.js"></script>
+<script src="js/fieldmap.js"></script>
+<script src="js/presets-bundle.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
