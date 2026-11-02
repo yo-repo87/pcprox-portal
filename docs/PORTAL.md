@@ -2,6 +2,8 @@
 
 A browser-only version of the reader portal. It talks to rf IDeas readers directly over **WebHID**. You don't need `start-helper.bat`, a local service, or an install. It is built from *rf IDeas pcProx — USB HID & Configuration Protocol Reference.md*.
 
+> **Update (Nov 2, 2026):** after checking against the vendor utility, the portal defaults to the pcProx **8-byte binary** feature-report protocol with a built-in settings map. The 24-byte ASCII protocol from the reference doc is still selectable on Home. See `../FACT-CHECK.md`. The status table below describes the ASCII mode.
+
 ## Running it
 
 - **Hosted:** https://yo-repo87.github.io/pcprox-portal/ (GitHub Pages, served from `docs/`).

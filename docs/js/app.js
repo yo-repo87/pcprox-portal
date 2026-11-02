@@ -12,7 +12,7 @@
 
   const newSlot = () => ({ src: '', label: '', targets: {}, cardType: null, cardPriority: null });
   const st = {
-    reader: null, map: PCX.defaultMap('none'),
+    reader: null, map: PCX.defaultMap('none'), protocol: 'bin',
     qrz: null, fw: '', readerVals: {},
     slots: [newSlot(), newSlot(), newSlot(), newSlot()], active: 0,
     lib: [], lastFile: null,
@@ -20,6 +20,8 @@
     plan: null, listening: false, pollTimer: null, lastPoll: 0, card: null,
   };
   const slot = () => st.slots[st.active];
+  const blockCmd = () => (st.protocol === 'bin' ? 'CFG' : 'QRZ');
+  const isBin = () => st.protocol === 'bin';
 
   // ---------- log / status ----------
   function log(msg, kind) {
@@ -87,7 +89,10 @@
     reader.on('tx', (b, id) => wire('TX', b, id));
     reader.on('rx', (b, id) => wire('RX', b, id));
     reader.on('input', b => { if (st.listening) handleCard(b, 'input'); });
-    st.map = PCX.loadMap(reader.vidpid);
+    // Protocol: 8-byte feature reports => pcProx binary; 24-byte => reference-doc ASCII.
+    const feats = reader.describe().flatMap(c => c.feature).map(f => f.bytes).filter(Boolean);
+    st.protocol = feats.length && feats.every(n => n > 8) ? 'ascii' : 'bin';
+    applyProtocol(false);
     st.qrz = null; st.fw = ''; st.readerVals = {}; st.plan = null; st.snapshots = []; st.selA = st.selB = null;
     if (st.slots[0].src === 'reader') st.slots[0] = newSlot();
 
@@ -101,26 +106,54 @@
       `<span class="muted small">feature ${c.feature.map(f => `#${f.id}:${f.bytes}B`).join(', ') || '—'} · input ${c.input.map(f => `#${f.id}:${f.bytes}B`).join(', ') || '—'}</span></div>`).join('') || '<span class="muted">none reported</span>';
     if (![...$('selReportId').options].some(o => o.value === String(info.reportId))) $('selReportId').insertAdjacentHTML('beforeend', `<option>${info.reportId}</option>`);
     $('selReportId').value = String(info.reportId);
+    if (isBin()) reader.reportLen = 8;
     $('inReportLen').value = reader.reportLen;
     $('hiRepNote').textContent = info.found ? 'from the HID descriptor' : 'no feature report in descriptor — defaults';
     updateRep();
-    $('btnDisconnect').disabled = false; $('btnWrite').disabled = false;
+    $('btnDisconnect').disabled = false;
     $('btnSimTap').hidden = reader.kind !== 'sim';
     $('stRight').textContent = `#1 USB ${reader.vidpid}${reader.kind === 'sim' ? ' (simulated)' : ''}`;
     applyTiming(); renderMapUi(); renderSnaps(); renderDiff(); renderQrz(); renderSlots(); renderSettings();
-    log(`Connected: ${reader.name} ${reader.vidpid} · report id ${reader.reportId}, ${reader.reportLen}-byte data`);
+    log(`Connected: ${reader.name} ${reader.vidpid} · ${isBin() ? 'binary 8-byte' : 'ASCII 24-byte'} protocol · report id ${reader.reportId}, ${reader.reportLen}-byte data`);
     if (!reader.hasVendorCollection()) log('No vendor-defined collection reported. If commands fail, switch the reader out of keyboard-wedge mode.', 'warn');
     status('Connected');
     // Read version + configuration on connect, as the vendor utility does (reads only).
-    try { await readVersion(); } catch (e) { log(`QSV: ${e.message}`, 'warn'); }
-    try { await readConfig(); } catch (e) { log(`QRZ: ${e.message}`, 'warn'); }
+    try { await readVersion(); } catch (e) { log(`Version: ${e.message}`, 'warn'); }
+    try { await readConfig(); } catch (e) { log(`Configuration: ${e.message}`, 'warn'); }
   }
+  // Switch protocol: reload the per-protocol field map and refresh the UI.
+  function applyProtocol(reread) {
+    const r = st.reader, bin = isBin();
+    $('selProto').value = st.protocol;
+    $('protoNote').textContent = bin
+      ? 'Built-in settings map (pages 0–2) from open-source notes tested on RDR-6081AKU; confirm values match the vendor utility.'
+      : 'Configuration layout must be mapped by diffing captures (Tools → Mapping workbench).';
+    if (r) {
+      r.reportLen = bin ? 8 : 24; $('inReportLen').value = r.reportLen; updateRep();
+      st.map = PCX.loadMap(r.vidpid, st.protocol);
+    }
+    $('beepNote').textContent = bin ? 'No beep command is known for the 8-byte protocol.' : '';
+    ['btnBeepS', 'btnBeepL', 'trayBeep'].forEach(id => $(id).disabled = bin);
+    $('snapCmd').innerHTML = (bin ? ['CFG', 'DEV', 'P3', 'P5', 'C8C0', 'C8C1', 'C8C2'] : ['QRZ', 'QSV', 'QDD', 'QS0', 'QUP', 'GS0', 'GL0'])
+      .map(c => `<option value="${c}">${SNAP_LABEL[c] || c}</option>`).join('');
+    $('fmCmd').value = blockCmd();
+    $('blkName').textContent = bin ? 'Configuration pages 0–2 (byte = page × 8 + position)' : 'QRZ block';
+    $('valLabel').textContent = bin ? 'Values read from this reader match the vendor utility (map verified)' : 'Validated on a re-flashable reader';
+    $('fmTemplate').disabled = bin; $('fmTemplate').placeholder = bin ? 'not used — the 8-byte protocol writes whole pages' : '(none — writing disabled)';
+    $('eeRow').hidden = !bin;
+    st.qrz = null; st.readerVals = {}; st.snapshots = []; st.selA = st.selB = null;
+    if (st.slots[0].src === 'reader') st.slots[0] = newSlot();
+    renderMapUi(); renderSnaps(); renderDiff(); renderQrz(); renderSlots(); renderSettings();
+    if (reread && r) { readVersion().catch(e => log(`Version: ${e.message}`, 'warn')).then(() => readConfig()).catch(e => log(`Configuration: ${e.message}`, 'warn')); }
+  }
+  const SNAP_LABEL = { CFG: 'Config pages 0–2', DEV: 'Device info (0x8A)', P3: 'Page 3 (0x83)', P5: 'Page 5 (0x85)', C8C0: '0x8C 01 00', C8C1: '0x8C 01 01', C8C2: '0x8C 01 02' };
+  $('selProto').onchange = () => { stopListening(); st.protocol = $('selProto').value; log(`Protocol set to ${st.protocol === 'bin' ? 'binary 8-byte' : 'ASCII 24-byte'}`); applyProtocol(true); };
   async function detach(silent) {
     stopListening();
     const r = st.reader; st.reader = null;
     if (r) { try { await r.close(); } catch (_) {} }
     $('devEmpty').hidden = false; $('devBody').hidden = true; $('btnKebab').disabled = true;
-    $('btnDisconnect').disabled = true; $('btnWrite').disabled = true; $('btnSimTap').hidden = true;
+    $('btnDisconnect').disabled = true; $('btnSimTap').hidden = true;
     $('hiModel').textContent = '—'; $('hiCols').textContent = '—';
     $('stRight').textContent = 'No reader';
     if (!silent) { log('Disconnected'); status('Disconnected'); }
@@ -162,6 +195,14 @@
     return { ...p, text: res.text };
   }
   async function readVersion() {
+    if (isBin()) {
+      const b = await need().bin([PCX.BIN.DEVINFO]);
+      const d = PCX.decodeDevInfo(b);
+      log(`Device info (0x8A): ${PCX.toHex(b)}${d ? ` → firmware ${d.firmware}, device type 0x${d.deviceType.toString(16).toUpperCase()}` : ''}`);
+      st.fw = d && b.some(x => x) ? d.firmware : '';
+      $('dvFw').textContent = st.fw || '—';
+      return;
+    }
     const p = await query('QSV');
     st.fw = p.bytes && p.bytes.length ? asciiOf(p.bytes) : p.text.slice(3);
     $('dvFw').textContent = st.fw || '—';
@@ -176,19 +217,30 @@
   $('trayBeep').onclick = beep(() => 1, false);
 
   // ---------- configuration slots ----------
-  const fieldsFor = k => st.map.fields.filter(f => f.key === k && f.cmd === 'QRZ');
+  const fieldsFor = k => st.map.fields.filter(f => f.key === k && f.cmd === blockCmd());
   function recomputeReaderVals() {
     st.readerVals = {};
     if (!st.qrz) return;
     for (const f of st.map.fields) {
-      if (f.cmd !== 'QRZ') continue;
+      if (f.cmd !== blockCmd()) continue;
       const v = PCX.extractField(st.qrz, f);
       if (v !== undefined) st.readerVals[f.key] = v;
     }
   }
+  async function readBlock() {
+    if (!isBin()) return (await query('QRZ')).bytes;
+    const r = need(), out = new Uint8Array(24);
+    status('Reading configuration pages 0–2…');
+    for (const pg of PCX.BIN.PAGES) {
+      const b = await r.bin([PCX.BIN.PAGE(pg)]);
+      out.set(b.slice(0, 8), pg * 8);
+    }
+    log(`Config pages 0–2: ${PCX.toHex(out.slice(0, 8))} | ${PCX.toHex(out.slice(8, 16))} | ${PCX.toHex(out.slice(16))}`);
+    if (out.every(x => x === 0)) throw new Error('Reader returned all-zero configuration pages — it may not speak the 8-byte protocol (try the ASCII protocol on Home)');
+    return out;
+  }
   async function readConfig() {
-    const p = await query('QRZ');
-    st.qrz = p.bytes;
+    st.qrz = await readBlock();
     recomputeReaderVals();
     const s0 = st.slots[0];
     if (!s0.src || s0.src === 'reader') { st.slots[0] = { ...newSlot(), src: 'reader', label: 'Reader configuration', targets: { ...st.readerVals } }; }
@@ -199,11 +251,16 @@
   }
   $('trayRead').onclick = guard(readConfig);
 
+  const cardTypeName = code => {
+    const h = Number(code).toString(16).toUpperCase().padStart(4, '0');
+    const n = (window.PCX_CARD_TYPES || {})[h];
+    return n ? `${n} (${h})` : `card type ${h}`;
+  };
   function slotOptions(i) {
     const o = ['<option value="">— empty —</option>'];
     if (i === 0) o.push(`<option value="reader">Reader configuration${st.qrz ? '' : ' (not read yet)'}</option>`);
     st.lib.forEach((p, li) => p.parsed.configs.forEach((c, ci) =>
-      o.push(`<option value="p:${li}:${ci}">${esc(p.label)}${p.parsed.configs.length > 1 ? ` · #${ci + 1}` : ''}${c.cardType != null ? ` · card type ${c.cardType}` : ''}</option>`)));
+      o.push(`<option value="p:${li}:${ci}">${esc(p.label)}${p.parsed.configs.length > 1 ? ` · #${ci + 1}` : ''}${c.cardType != null ? ` · ${esc(cardTypeName(c.cardType))}` : ''}</option>`)));
     return o.join('');
   }
   function renderSlots() {
@@ -237,8 +294,9 @@
     const rv = st.active === 0 ? st.readerVals[s.key] : undefined;
     const tv = sl.targets[s.key];
     const changed = rv !== undefined && tv !== undefined && Number(tv) !== Number(rv);
-    const meta = [rv !== undefined ? `reader ${rv}` : null,
-      fl.length ? `<span class="tag ok">byte ${fl.map(x => x.byte).join('+')}</span>` : `<span class="tag ${tv !== undefined ? 'warn' : ''}">not mapped</span>`].filter(Boolean).join(' · ');
+    const chr = PCX.CHAR_KEYS.includes(s.key) && tv !== undefined ? `key: ${esc(PCX.scancodeName(Number(tv)))}` : null;
+    const meta = [rv !== undefined ? `reader ${rv}` : null, chr,
+      fl.length ? `<span class="tag ok">${fl.map(x => (isBin() ? `page ${Math.floor(x.byte / 8)}.${x.byte % 8}` : `byte ${x.byte}`)).join('+')}</span>` : `<span class="tag ${tv !== undefined ? 'warn' : ''}">not mapped</span>`].filter(Boolean).join(' · ');
     const lbl = `<div class="lbl"><div class="k">${s.key}${UNIT[s.key] ? ` <span class="muted">(${UNIT[s.key]})</span>` : ''}</div><div class="d">${esc(s.desc)}</div><div class="meta">${meta}</div></div>`;
     const ctl = s.type === 'bool'
       ? `<label class="tg" title="${tv === undefined ? 'not set' : tv}"><input type="checkbox" data-k="${s.key}" ${tv ? 'checked' : ''}><span></span></label>`
@@ -272,41 +330,67 @@
   $('fmtMapped').onchange = renderSettings;
 
   // ---------- write ----------
-  $('btnWrite').onclick = guard(() => {
-    if (!st.qrz) throw new Error('Read the configuration first (tray ↻ or device menu)');
+  // Write always opens the dialog; if something blocks the write, the dialog says what.
+  function showWriteBlocked(checks) {
+    st.plan = null;
+    $('planOut').textContent = 'Nothing can be written yet:\n\n' + checks.map(c => `${c.ok ? '✓' : '✗'} ${c.text}`).join('\n');
+    $('btnExecWrite').disabled = true;
+    $('planNote').textContent = 'Fix the ✗ items, then press Write again. See Tools → Mapping workbench for mapping and the write template.';
+    $('writeModal').hidden = false;
+  }
+  $('btnWrite').onclick = guard(async () => {
+    if (st.reader && !st.qrz) {
+      status('Reading configuration before write…');
+      try { await readConfig(); } catch (e) { log(`Configuration: ${e.message}`, 'err'); }
+    }
+    const bin = isBin();
+    const mapped = st.map.fields.filter(f => f.cmd === blockCmd()).length;
+    const checks = [
+      { ok: !!st.reader, text: st.reader ? `Reader connected (${st.reader.name})` : 'No reader connected — press Connect first' },
+      { ok: !!st.qrz, text: st.qrz ? `Configuration read (${st.qrz.length} bytes)` : 'Configuration could not be read — check the log in Test Area' },
+      { ok: mapped > 0, text: mapped ? `${mapped} setting(s) mapped to reader bytes${bin ? ' (built-in map)' : ''}` : 'No settings are mapped to reader bytes yet — capture and diff in Tools → Mapping workbench' },
+    ];
+    if (!bin) checks.push({ ok: !!st.map.writeTemplate, text: st.map.writeTemplate ? `Write template: ${st.map.writeTemplate}` : 'No write template set (Tools → Mapping workbench, step 4)' });
+    checks.push({ ok: !!st.map.writeValidated, text: st.map.writeValidated ? (bin ? 'Map marked as verified against the vendor utility' : 'Write template marked as validated')
+      : (bin ? 'Map not yet verified: compare the values on Timing/Format with the vendor utility, then tick the box in Tools → Mapping workbench' : 'Write template not marked as validated on a spare reader') });
+    if (!st.reader || !st.qrz || !mapped) return showWriteBlocked(checks);
     const s0 = st.slots[0];
     const changed = {};
     for (const [k, v] of Object.entries(s0.targets)) if (fieldsFor(k).length && st.readerVals[k] !== undefined && Number(v) !== Number(st.readerVals[k])) changed[k] = v;
-    const unwritable = Object.keys(s0.targets).filter(k => !fieldsFor(k).length);
+    const unwritable = Object.keys(s0.targets).filter(k => !fieldsFor(k).length && s0.targets[k] !== undefined);
     const lines = [`Target: configuration 1 (${s0.label || 'empty'})`];
     let plan = null;
     if (!Object.keys(changed).length) lines.push('', 'No mapped setting differs from the reader — nothing to write.');
     else {
-      plan = PCX.planWrite(st.map, st.qrz, changed);
+      plan = bin ? PCX.planBinWrite(st.map, st.qrz, changed, $('chkEeprom').checked) : PCX.planWrite(st.map, st.qrz, changed);
       lines.push('', `Settings: ${plan.applied.map(k => `${k} ${st.readerVals[k]} → ${changed[k]}`).join(', ')}`, '', 'Byte changes:');
-      plan.diffs.forEach(d => lines.push(`  byte ${String(d.byte).padStart(2)}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
-      lines.push('', 'Commands:');
-      if (!st.map.writeTemplate) lines.push('  (none — set a write template in Tools → Mapping workbench)');
-      plan.commands.forEach(c => lines.push(`  ${c}<CR>`));
+      plan.diffs.forEach(d => lines.push(`  ${bin ? `page ${Math.floor(d.byte / 8)} pos ${d.byte % 8}` : `byte ${String(d.byte).padStart(2)}`}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
+      lines.push('', bin ? 'Feature reports (8 bytes each):' : 'Commands:');
+      if (!bin && !st.map.writeTemplate) lines.push('  (none — set a write template in Tools → Mapping workbench)');
+      plan.commands.forEach(c => lines.push(`  ${c}${bin ? '' : '<CR>'}`));
     }
-    if (unwritable.length) lines.push('', `Not writable (no confirmed byte): ${unwritable.length} setting(s) — ${unwritable.slice(0, 10).join(', ')}${unwritable.length > 10 ? '…' : ''}`);
+    if (unwritable.length) lines.push('', `Not writable (no known byte): ${unwritable.length} setting(s) — ${unwritable.slice(0, 10).join(', ')}${unwritable.length > 10 ? '…' : ''}`);
     const others = st.slots.slice(1).filter(s => s.src).length;
-    if (others) lines.push('', `Configurations 2–4 (${others} filled) are not written: no confirmed command selects a configuration slot.`);
+    if (others) lines.push('', `Configurations 2–4 (${others} filled) are not written: the command that selects a configuration slot is not known yet.`);
     st.plan = plan;
     $('planOut').textContent = lines.join('\n');
     const ok = !!(plan && plan.commands.length && st.map.writeValidated);
     $('btnExecWrite').disabled = !ok;
-    $('planNote').textContent = !plan ? '' : !st.map.writeTemplate ? 'Writing is disabled until a write template is set.' : !st.map.writeValidated ? 'Writing is disabled until the template is marked as validated.' : 'After writing, the reader is re-read and every changed byte is verified.';
+    $('planNote').textContent = !plan ? '' : (!bin && !st.map.writeTemplate) ? 'Writing is disabled until a write template is set.'
+      : !st.map.writeValidated ? (bin ? 'Writing is disabled until you confirm the read values match the vendor utility (Tools → Mapping workbench).' : 'Writing is disabled until the template is marked as validated.')
+      : 'After writing, the reader is re-read and every changed byte is verified.';
     $('writeModal').hidden = false;
   });
+  $('chkEeprom').onchange = () => { if (!$('writeModal').hidden) $('btnWrite').click(); };
   $('btnPlanCancel').onclick = () => { $('writeModal').hidden = true; };
   $('btnExecWrite').onclick = guard(async () => {
     const plan = st.plan; const r = need();
     if (!plan || !plan.commands.length) return;
-    if (!confirm(`Send ${plan.commands.length} write command(s) to ${r.name}? These readers control physical access.`)) return;
+    if (!confirm(`Send ${plan.commands.length} ${isBin() ? 'feature report(s)' : 'write command(s)'} to ${r.name}? These readers control physical access.`)) return;
     $('btnExecWrite').disabled = true;
     status('Writing…');
-    for (const c of plan.commands) {
+    if (isBin()) { await r.binSequence(plan.reports); plan.commands.forEach(c => log(`WRITE ${c}`)); }
+    else for (const c of plan.commands) {
       const res = await r.command(c, { pollReads: 3 });
       log(`WRITE ${c} → ${res.text || '(no reply)'}`);
     }
@@ -316,14 +400,19 @@
     const bad = plan.diffs.filter(d => st.qrz[d.byte] !== want[d.byte]);
     $('writeModal').hidden = true;
     if (bad.length) log(`Verify FAILED on byte(s) ${bad.map(d => `${d.byte} (want ${PCX.hex2(want[d.byte])}, got ${PCX.hex2(st.qrz[d.byte] ?? 0)})`).join(', ')}`, 'err');
-    else { log(`Verified: all ${plan.diffs.length} changed byte(s) read back correctly`); status('Write verified'); r.command(PCX.beepCommand(1, false), { pollReads: 1 }).catch(() => {}); }
+    else {
+      log(`Verified: all ${plan.diffs.length} changed byte(s) read back correctly${isBin() && !$('chkEeprom').checked ? ' (not saved to EEPROM — lost on unplug)' : ''}`);
+      status('Write verified');
+      if (!isBin()) r.command(PCX.beepCommand(1, false), { pollReads: 1 }).catch(() => {});
+    }
   });
 
   // ---------- card reading (Test Area) ----------
   const s0val = (k, d) => st.slots[0].targets[k] ?? st.readerVals[k] ?? d;
-  function handleCard(bytes, src) {
+  function handleCard(bytes, src, bitsOverride) {
     const now = performance.now();
-    const { bits, idBytes } = PCX.extractCardId(bytes, st.map.layout);
+    const ex = PCX.extractCardId(bytes, st.map.layout);
+    const bits = bitsOverride ?? ex.bits, idBytes = ex.idBytes;
     const hold = Number(s0val('iIDHoldTO', 1000)) || 1000;
     if (!idBytes.length || idBytes.every(b => b === 0)) { if (st.card && now - st.card.seen >= hold) st.card = null; return; }
     const key = PCX.toHex(idBytes, '');
@@ -333,7 +422,9 @@
     if (bits && bits <= idBytes.length * 8) v &= (1n << BigInt(bits)) - 1n;
     let split = '—';
     if (bits && bits <= 64) {
-      const s = PCX.splitWiegand(v, bits, Number(s0val('iLeadParityBitCnt', 1)), Number(s0val('iTrailParityBitCnt', 1)), Number(s0val('iIDBitCnt', 16)));
+      // binary protocol: the reader has already stripped parity, so split the data bits directly
+      const s = isBin() ? PCX.splitWiegand(v, bits, 0, 0, Number(s0val('iIDBitCnt', 16)))
+        : PCX.splitWiegand(v, bits, Number(s0val('iLeadParityBitCnt', 1)), Number(s0val('iTrailParityBitCnt', 1)), Number(s0val('iIDBitCnt', 16)));
       if (s) split = `${s.fac} / ${s.id}`;
     }
     $('cardBig').textContent = `${v}  ·  ${bits ?? '?'} bits`;
@@ -346,6 +437,22 @@
   }
   function startListening() {
     st.listening = true; $('btnCardListen').textContent = 'Stop listening';
+    if (isBin()) {
+      // 0x8F = card data buffer, 0x8E = bit count; polled no faster than every 235 ms
+      st.pollTimer = setInterval(async () => {
+        const now = performance.now();
+        if (!st.reader || st.polling || now - st.lastPoll < PCX.POLL_THROTTLE_MS) return;
+        st.lastPoll = now; st.polling = true;
+        try {
+          const data = await st.reader.bin([PCX.BIN.CARD_DATA]);
+          if (data.every(b => b === 0)) handleCard(data, 'poll', 0);
+          else { const info = await st.reader.bin([PCX.BIN.CARD_INFO]); handleCard(data, 'poll', info[0]); }
+        } catch (e) { log(`Card poll: ${e.message}`, 'err'); stopListening(); }
+        finally { st.polling = false; }
+      }, 50);
+      log('Listening for cards (polling 0x8F/0x8E every ≥235 ms). Tip: with bHaltKBSnd = 0 the reader also types the ID as keystrokes.');
+      return;
+    }
     const cmd = (st.map.pollCommand || '').trim();
     if (cmd) {
       st.pollTimer = setInterval(async () => {
@@ -464,21 +571,27 @@
     if (!st.qrz) return;
     $('qrzLen').textContent = `${st.qrz.length} bytes`;
     const mapped = new Map();
-    for (const f of st.map.fields) if (f.cmd === 'QRZ') for (let i = 0; i < f.width; i++) mapped.set(f.byte + i, (mapped.get(f.byte + i) || []).concat(f.key));
+    for (const f of st.map.fields) if (f.cmd === blockCmd()) for (let i = 0; i < f.width; i++) mapped.set(f.byte + i, (mapped.get(f.byte + i) || []).concat(f.key));
     $('qrzBytes').innerHTML = Array.from(st.qrz, (b, i) => {
       const m = mapped.get(i);
-      return `<div class="byte ${m ? 'mapped' : ''} ${i < 5 ? 'conf' : ''}" title="${esc(m ? m.join(', ') : i < 5 ? 'confirmed decode' : 'unmapped')}"><i>${i}</i>${PCX.hex2(b)}</div>`;
+      return `<div class="byte ${m ? 'mapped' : ''} ${!isBin() && i < 5 ? 'conf' : ''}" title="${esc(m ? m.join(', ') : !isBin() && i < 5 ? 'confirmed decode' : 'unmapped')}"><i>${isBin() ? `p${Math.floor(i / 8)}.${i % 8}` : i}</i>${PCX.hex2(b)}</div>`;
     }).join('');
-    const c = PCX.decodeQRZConfirmed(st.qrz);
+    const c = isBin() ? null : PCX.decodeQRZConfirmed(st.qrz);
+    $('qrzConfirmed').closest('details').hidden = isBin();
     $('qrzConfirmed').innerHTML = c ? '<tr><th>Byte</th><th>Op</th><th>Value</th><th>Meaning</th></tr>' + c.map(r => `<tr><td>${r.byte}</td><td><code>${esc(r.op)}</code></td><td>${r.value} (${hx(r.value)})</td><td>${esc(r.meaning)}</td></tr>`).join('') : '<tr><td>Block shorter than 5 bytes</td></tr>';
   }
   $('fmKey').innerHTML = PCX.SETTINGS.map(s => `<option>${s.key}</option>`).join('');
   $('btnSnap').onclick = guard(async () => {
     const cmd = $('snapCmd').value;
-    const p = await query(cmd);
+    let p;
+    if (cmd === 'CFG') { const b = await readBlock(); p = { bytes: b, text: PCX.toHex(b) }; }
+    else if (isBin()) {
+      const code = cmd === 'DEV' ? [PCX.BIN.DEVINFO] : PCX.BIN.EXTRA[cmd];
+      const b = await need().bin(code); p = { bytes: b, text: PCX.toHex(b) };
+    } else p = await query(cmd);
     const snap = { id: ++st.snapSeq, cmd, label: $('snapLabel').value.trim() || `${cmd} #${st.snapSeq}`, bytes: p.bytes || new Uint8Array(0), text: p.text, time: new Date().toISOString() };
     st.snapshots.push(snap);
-    if (cmd === 'QRZ') { st.qrz = snap.bytes; recomputeReaderVals(); renderQrz(); renderSettings(); }
+    if (cmd === blockCmd()) { st.qrz = snap.bytes; recomputeReaderVals(); renderQrz(); renderSettings(); }
     if (st.selA == null) st.selA = snap.id; else st.selB = snap.id;
     $('snapLabel').value = '';
     renderSnaps(); renderDiff();
@@ -527,7 +640,7 @@
   const refreshAll = () => { recomputeReaderVals(); renderMapUi(); renderQrz(); renderSettings(); renderPresetTable(); };
   $('btnAddField').onclick = guard(() => {
     if (!st.reader) throw new Error('Connect a reader first — field maps are saved per reader model');
-    const f = { key: $('fmKey').value, cmd: $('fmCmd').value, byte: Number($('fmByte').value), width: Number($('fmWidth').value), mask: parseInt($('fmMask').value, 16), shift: Number($('fmShift').value), note: $('fmNote').value.trim() };
+    const f = { key: $('fmKey').value, cmd: $('fmCmd').value, byte: Number($('fmByte').value), width: Number($('fmWidth').value), mask: parseInt($('fmMask').value, 16), shift: Number($('fmShift').value), scale: Math.max(1, Number($('fmScale').value) || 1), note: $('fmNote').value.trim() };
     PCX.validateField(f);
     const clash = st.map.fields.find(x => x.cmd === f.cmd && x.key !== f.key && rangesOverlap(x, f));
     if (clash && !confirm(`${clash.key} already uses overlapping bits of byte ${clash.byte}. Add anyway?`)) return;
@@ -542,7 +655,7 @@
   });
   function renderMapUi() {
     const m = st.map;
-    $('fieldTable').tBodies[0].innerHTML = m.fields.slice().sort((a, b) => a.byte - b.byte).map(f => `<tr><td>${esc(f.key)}</td><td>${f.cmd}</td><td>${f.byte}</td><td>${f.width}</td><td class="mono">${hx(f.mask)}</td><td>${f.shift}</td><td class="muted small">${esc(f.note)}</td>
+    $('fieldTable').tBodies[0].innerHTML = m.fields.slice().sort((a, b) => a.byte - b.byte).map(f => `<tr><td>${esc(f.key)}</td><td>${f.cmd}</td><td>${f.byte}</td><td>${f.width}</td><td class="mono">${hx(f.mask)}</td><td>${f.shift}${f.scale > 1 ? ` ×${f.scale}` : ''}</td><td class="muted small">${esc(f.note)}</td>
       <td><button class="x" data-rm="${esc(f.key)}|${f.cmd}|${f.byte}">✕</button></td></tr>`).join('') || '<tr><td colspan="8" class="muted">No fields mapped yet.</td></tr>';
     $('fieldTable').querySelectorAll('[data-rm]').forEach(b => b.onclick = () => {
       const [k, c, by] = b.dataset.rm.split('|');
@@ -564,8 +677,10 @@
     persistMap(); log(`Write template set to "${t || '(none)'}" — not validated`);
   });
   $('fmValidated').onchange = () => {
-    if ($('fmValidated').checked && !st.map.writeTemplate) { $('fmValidated').checked = false; return log('Set a write template first', 'warn'); }
-    if ($('fmValidated').checked && !confirm('Confirm you have validated this write template (write, re-read, diff) on a reader you can safely re-flash.')) { $('fmValidated').checked = false; return; }
+    if ($('fmValidated').checked && !isBin() && !st.map.writeTemplate) { $('fmValidated').checked = false; return log('Set a write template first', 'warn'); }
+    if ($('fmValidated').checked && !confirm(isBin()
+      ? 'Confirm the values shown on Timing and Format match what the vendor utility shows for this reader. (Best: also save a backup .hwg+ from the vendor utility first.)'
+      : 'Confirm you have validated this write template (write, re-read, diff) on a reader you can safely re-flash.')) { $('fmValidated').checked = false; return; }
     st.map.writeValidated = $('fmValidated').checked; persistMap();
   };
   ['lyBits', 'lyStart', 'lyLen', 'lyRev', 'lyPoll'].forEach(id => $(id).onchange = () => {
@@ -626,7 +741,7 @@
   $('btnLogClear').onclick = () => { $('log').textContent = ''; };
   document.addEventListener('keydown', e => { if (e.key === 'Escape') { fab(false); closeMenus(); $('writeModal').hidden = true; } });
 
-  renderSlots(); renderMapUi(); renderSnaps(); renderSettings();
+  applyProtocol(false);
   loadLibrary();
   log('Portal ready. Connect a reader, or try the simulated reader.');
 })();

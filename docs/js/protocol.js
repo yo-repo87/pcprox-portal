@@ -6,13 +6,16 @@
   const PCX = root.PCX = root.PCX || {};
 
   // ---------- Device identity (Confirmed) ----------
-  PCX.VENDOR_IDS = [0x0C27, 0x19E5];
+  // VID/PIDs as listed in the vendor utility's pcProxVIDPID.txt (+ 3BFA from its DLL).
+  PCX.VENDOR_IDS = [0x0C27, 0x19E5, 0x171B];
   PCX.MODELS = {
+    '0C27:3BFA': 'RF IDeas pcProx (USB keyboard emulation)',
+    '0C27:CCDB': 'Imprivata FIDO CCID',
+    '171B:2001': 'NT-ware',
     '0C27:3B4C': 'RF IDeas HID CDC',
     '0C27:3B1E': 'RF IDeas BLE',
     '0C27:3B57': 'RF IDeas Wiegand',
     '0C27:3BFB': 'RF IDeas ProxAdv',
-    '0C27:3BFA': 'RF IDeas (ProxAdv variant)',
     '0C27:CCDA': 'RF IDeas CCID',
     '0C27:3A01': 'RF IDeas KPIT',
     '19E5:2021': 'RF IDeas JM3',
@@ -125,10 +128,78 @@
     return out;
   };
 
+  // =====================================================================
+  // Binary 8-byte feature-report protocol (pcProx USB keyboard readers).
+  // Sources: the vendor DLL ("# 8 byte USB Feature Reports" in its raw-dump
+  // writer) and the open-source pcprox library/protocol notes by M. Farrell,
+  // tested on 0C27:3BFA (RDR-6081AKU, fw 07.3.0). Not an rf IDeas document.
+  // =====================================================================
+  PCX.BIN = {
+    REPORT_LEN: 8,
+    PAGE: p => 0x80 | p,     // select config page p for read (then GET) or write (then SET data)
+    PAGES: [0, 1, 2],        // documented, writable pages
+    DEVINFO: 0x8A,           // device / firmware info
+    CARD_DATA: 0x8F,         // card read buffer 0 (ID bytes, little-endian, parity stripped)
+    CARD_INFO: 0x8E,         // card read buffer 1 (byte 0 = bit count of buffer 0)
+    FINISH: 0x90,            // end configuration; param0 = bitmask of pages to save to EEPROM
+    // extra read-only queries seen in the open-source tool (meaning unconfirmed)
+    EXTRA: { P3: [0x83], P5: [0x85], C8C0: [0x8C, 0x01, 0x00], C8C1: [0x8C, 0x01, 0x01], C8C2: [0x8C, 0x01, 0x02] },
+  };
+  PCX.binCmd = bytes => { const o = new Uint8Array(8); o.set(Array.from(bytes).slice(0, 8)); return o; };
+  // Device info reply: [?, ?, {minor:4, release:4}, major, ?, deviceType(LE16), ?]
+  PCX.decodeDevInfo = b => {
+    if (!b || b.length < 7) return null;
+    const major = b[3], rel = b[2] >> 4, minor = b[2] & 0x0F;
+    return { firmware: `${String(major).padStart(2, '0')}.${rel}.${minor}`, deviceType: b[5] | (b[6] << 8) };
+  };
+
+  // Built-in field map for the binary protocol. Block = pages 0,1,2 concatenated (byte = page*8 + pos).
+  // scale = reader units -> ms (time fields are stored as 4 ms / 50 ms ticks).
+  const F = (key, page, pos, mask, shift = 0, scale = 1) => ({ key, cmd: 'CFG', byte: page * 8 + pos, width: 1, mask, shift, scale, note: 'built-in (open-source pcprox notes; verify on your model)', builtin: true });
+  PCX.BUILTIN_FIELDS = [
+    F('iFACDispLen', 0, 0, 0xFF), F('iIDDispLen', 0, 1, 0xFF),
+    F('iLeadParityBitCnt', 0, 2, 0x0F), F('iTrailParityBitCnt', 0, 2, 0xF0, 4),
+    F('iIDBitCnt', 0, 3, 0xFF), F('iTotalBitCnt', 0, 4, 0xFF),
+    F('iFACIDDelim', 0, 5, 0xFF), F('iELDelim', 0, 6, 0xFF),
+    F('bFixLenDsp', 0, 7, 0x01, 0), F('bFrcBitCntEx', 0, 7, 0x02, 1), F('bStripFac', 0, 7, 0x04, 2), F('bSndFac', 0, 7, 0x08, 3),
+    F('bUseDelFac2Id', 0, 7, 0x10, 4), F('bNoUseELChar', 0, 7, 0x20, 5), F('bSndOnRx', 0, 7, 0x40, 6), F('bHaltKBSnd', 0, 7, 0x80, 7),
+    F('iBitStrmTO', 1, 1, 0xFF, 0, 4), F('iIDHoldTO', 1, 2, 0xFF, 0, 50), F('iIDLockOutTm', 1, 3, 0xFF, 0, 50),
+    F('iUSBKeyPrsTm', 1, 4, 0xFF, 0, 4), F('iUSBKeyRlsTm', 1, 5, 0xFF, 0, 4),
+    F('bUse64Bit', 1, 6, 0x02, 1), F('bPrxProEm', 1, 6, 0x08, 3), F('bSndSFID', 1, 6, 0x10, 4), F('bSndSFFC', 1, 6, 0x20, 5),
+    F('bSndSFON', 1, 6, 0x40, 6), F('bUseNumKP', 1, 6, 0x80, 7),
+    F('iRedLEDState', 2, 0, 0x01, 0), F('iGrnLEDState', 2, 0, 0x02, 1), F('iBeeperState', 2, 0, 0x04, 2), F('iRelayState', 2, 0, 0x08, 3),
+    F('bUseLeadChrs', 2, 1, 0x01, 0), F('bAppCtrlsLED', 2, 1, 0x02, 1), F('bDspHex', 2, 1, 0x04, 2), F('bWiegInvData', 2, 1, 0x08, 3),
+    F('bBeepID', 2, 1, 0x10, 4), F('bRevWiegBits', 2, 1, 0x20, 5), F('bRevBytes', 2, 1, 0x40, 6), F('bUseInvDataF', 2, 1, 0x80, 7),
+    F('iCrdGnChr0', 2, 2, 0xFF), F('iCrdGnChr1', 2, 3, 0xFF),
+    F('iLeadChrCnt', 2, 4, 0x0F), F('iTrailChrCnt', 2, 4, 0xF0, 4),
+    F('iLeadChr0', 2, 5, 0xFF), F('iLeadChr1', 2, 6, 0xFF), F('iLeadChr2', 2, 7, 0xFF),
+  ];
+  // Not in the binary map: AZERTYShiftlock, ExtendedPrecisionMath, iExOutputFormat, bNotBootDev, bLowerCaseHex
+  // (location unknown), iTrailChr0..2 (share the iLeadChr bytes, offset by iLeadChrCnt).
+
+  // Character fields (iFACIDDelim, iELDelim, lead/trail/gone chars) are USB HID keyboard
+  // scancodes; bit 0x80 = Shift. e.g. 40 (0x28) = Enter, 179 (0xB3) = Shift+';' = ':'.
+  const SC = { 0x28: 'Enter', 0x29: 'Esc', 0x2A: 'Backspace', 0x2B: 'Tab', 0x2C: 'Space', 0x2D: '-', 0x2E: '=', 0x2F: '[', 0x30: ']', 0x31: '\\', 0x33: ';', 0x34: "'", 0x35: '`', 0x36: ',', 0x37: '.', 0x38: '/' };
+  const SHIFTED = { '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|', ';': ':', "'": '"', '`': '~', ',': '<', '.': '>', '/': '?', 1: '!', 2: '@', 3: '#', 4: '$', 5: '%', 6: '^', 7: '&', 8: '*', 9: '(', 0: ')' };
+  PCX.CHAR_KEYS = ['iFACIDDelim', 'iELDelim', 'iCrdGnChr0', 'iCrdGnChr1', 'iLeadChr0', 'iLeadChr1', 'iLeadChr2', 'iTrailChr0', 'iTrailChr1', 'iTrailChr2'];
+  PCX.scancodeName = v => {
+    if (!v) return 'none';
+    const shift = (v & 0x80) !== 0, c = v & 0x7F;
+    let k = null;
+    if (c >= 0x04 && c <= 0x1D) k = String.fromCharCode(97 + c - 4);
+    else if (c >= 0x1E && c <= 0x27) k = String((c - 0x1D) % 10);
+    else k = SC[c] || null;
+    if (k == null) return `scancode 0x${c.toString(16).toUpperCase()}${shift ? ' + Shift' : ''}`;
+    if (!shift) return k;
+    if (k.length === 1 && /[a-z]/.test(k)) return k.toUpperCase();
+    return SHIFTED[k] ?? `Shift+${k}`;
+  };
+
   // ---------- Card ID helpers ----------
   // Extract an ID from a raw report given a (runtime-confirmed) layout.
   PCX.extractCardId = (bytes, layout) => {
     const L = Object.assign({ bitCountByte: 0, idStart: 1, idLen: 8, reverse: false }, layout || {});
+    // reverse = bytes are little-endian (least significant first); output idBytes are big-endian.
     const bits = L.bitCountByte >= 0 && L.bitCountByte < bytes.length ? bytes[L.bitCountByte] : null;
     let id = Array.from(bytes.slice(L.idStart, L.idStart + L.idLen));
     if (L.reverse) id = id.reverse();

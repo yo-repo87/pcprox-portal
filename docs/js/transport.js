@@ -107,6 +107,28 @@
       });
     }
     rawRead() { return this.lock.run(() => this.readFeature()); }
+
+    // ---- binary 8-byte protocol ----
+    // One command report, optionally followed by a GET_FEATURE read.
+    bin(cmd, read = true) {
+      return this.lock.run(async () => {
+        const buf = new Uint8Array(this.reportLen); buf.set(Array.from(cmd).slice(0, this.reportLen));
+        await this.writeFeature(buf);
+        if (!read) return null;
+        await sleep(this.pollDelay);
+        return (await this.readFeature()).slice(0, 8);
+      });
+    }
+    // A sequence of SET_FEATURE reports sent back-to-back under one lock (page writes).
+    binSequence(reports) {
+      return this.lock.run(async () => {
+        for (const r of reports) {
+          const buf = new Uint8Array(this.reportLen); buf.set(Array.from(r).slice(0, this.reportLen));
+          await this.writeFeature(buf);
+          await sleep(5);
+        }
+      });
+    }
   }
 
   // ---------- Real device via WebHID ----------
@@ -185,9 +207,13 @@
       this.vidpid = PCX.vidpid(this.vid, this.pid);
       this.block = Uint8Array.from([0x05, 0x03, 0x00, 0x1A, 0x10, 0x01, 0x01, 0xB3, 0x28, 0x14]);
       this.pending = new Uint8Array(this.reportLen);
+      // binary protocol state: pages 0..2 (an H10301 26-bit setup), EEPROM copy, selected page, card buffers
+      this.pages = [Uint8Array.from([3, 5, 0x11, 16, 26, 0xB3, 0x28, 0x1D]), Uint8Array.from([0, 20, 20, 24, 5, 5, 0x40, 0]), Uint8Array.from([0, 0x18, 0, 0, 0, 0, 0, 0])];
+      this.eeprom = this.pages.map(p => p.slice());
+      this.sel = null; this.cardData = new Uint8Array(8); this.cardBits = 0;
     }
-    describe() { return [{ usagePage: 0xFF00, usage: 0x01, feature: [{ id: 0, bytes: 24 }], input: [{ id: 0, bytes: 9 }], output: [] }]; }
-    detectReport() { return { reportId: 0, reportLen: 24, found: true }; }
+    describe() { return [{ usagePage: 0xFF00, usage: 0x01, feature: [{ id: 0, bytes: 8 }], input: [], output: [] }]; }
+    detectReport() { return { reportId: 0, reportLen: 8, found: true }; }
     hasVendorCollection() { return true; }
     async open() { return this.detectReport(); }
     async close() {}
@@ -195,6 +221,17 @@
     _reply(s) { const o = new Uint8Array(this.reportLen); const t = s + '\r'; for (let i = 0; i < t.length && i < o.length; i++) o[i] = t.charCodeAt(i); return o; }
     async _send(bytes) {
       await sleep(4);
+      // ---- binary protocol ----
+      if (this.sel != null) { this.pages[this.sel] = bytes.slice(0, 8); this.sel = null; this.pending = new Uint8Array(this.reportLen); return; }
+      if (bytes[0] & 0x80) {
+        const c = bytes[0], o = new Uint8Array(this.reportLen);
+        if (c >= 0x80 && c <= 0x82) { this.sel = c & 0x0F; o.set(this.pages[this.sel]); }
+        else if (c === 0x8A) o.set([0, 0, 0x90, 16, 0, 0x01, 0x00, 0]);       // fw 16.9.0, device type 1
+        else if (c === 0x8F) o.set(this.cardData);
+        else if (c === 0x8E) o.set([this.cardBits, this.cardBits]);
+        else if (c === 0x90) { for (let p = 0; p < 3; p++) if (bytes[1] & (1 << p)) this.eeprom[p] = this.pages[p].slice(); }
+        this.pending = o; return;
+      }
       const cmd = PCX.decodeReply(bytes).text.toUpperCase();
       const hexStr = s => PCX.toHex(Array.from(s, c => c.charCodeAt(0)), '');
       let r = '';
@@ -213,7 +250,7 @@
       else r = 'ERR';
       this.pending = this._reply(r);
     }
-    async _receive() { await sleep(3); return this.pending.slice(); }
+    async _receive() { await sleep(3); this.sel = null; return this.pending.slice(); }
     _beep(long) {
       try {
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -229,6 +266,13 @@
       const ep = ones((data >> 12) & 0xFFF) % 2;           // even parity over first 12 data bits
       const op = 1 - (ones(data & 0xFFF) % 2);             // odd parity over last 12 data bits
       const v = (ep << 25) | (data << 1) | op;
+      // binary card buffers: parity stripped per page 0, little-endian; cleared after iIDHoldTO
+      const lead = this.pages[0][2] & 0x0F, trail = this.pages[0][2] >> 4, nb = 26 - lead - trail;
+      const stripped = (v >>> trail) & ((1 << nb) - 1);
+      this.cardData = new Uint8Array(8); for (let i = 0; i < 4; i++) this.cardData[i] = (stripped >>> (8 * i)) & 0xFF;
+      this.cardBits = nb;
+      clearTimeout(this._holdT);
+      this._holdT = setTimeout(() => { this.cardData = new Uint8Array(8); this.cardBits = 0; }, (this.pages[1][2] || 20) * 50);
       const rep = new Uint8Array(9);
       rep[0] = 26;
       for (let i = 0; i < 4; i++) rep[8 - i] = (v >>> (8 * i)) & 0xFF;
