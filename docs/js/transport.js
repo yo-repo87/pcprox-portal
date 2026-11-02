@@ -208,10 +208,16 @@
       this.block = Uint8Array.from([0x05, 0x03, 0x00, 0x1A, 0x10, 0x01, 0x01, 0xB3, 0x28, 0x14]);
       this.pending = new Uint8Array(this.reportLen);
       // binary protocol state: pages 0..2 (an H10301 26-bit setup), EEPROM copy, selected page, card buffers
-      this.pages = [Uint8Array.from([3, 5, 0x11, 16, 26, 0xB3, 0x28, 0x1D]), Uint8Array.from([0, 20, 20, 24, 5, 5, 0x40, 0]), Uint8Array.from([0, 0x18, 0, 0, 0, 0, 0, 0])];
-      this.eeprom = this.pages.map(p => p.slice());
+      // pcProx Plus-like: 4 configurations (card types as on the user's RDR-805x), each with pages 0..2
+      const base = () => [Uint8Array.from([3, 5, 0x11, 16, 26, 0xB3, 0x28, 0x1D]), Uint8Array.from([0, 20, 20, 24, 5, 5, 0x40, 0]), Uint8Array.from([0, 0x18, 0, 0, 0, 0, 0, 0])];
+      const mk = (ct, prio) => ({ pages: base(), ct, prio });
+      this.banks = { 1: [mk(0xEF01, 1), mk(0xF802, 0), mk(0xFC02, 0), mk(0xEA02, 0)] };
+      this.banks[2] = this._cloneBank(this.banks[1]); this.banks[3] = this._cloneBank(this.banks[1]);
+      this.active = 0; this.volume = 2;
       this.sel = null; this.cardData = new Uint8Array(8); this.cardBits = 0;
     }
+    _cloneBank(b) { return b.map(c => ({ pages: c.pages.map(p => p.slice()), ct: c.ct, prio: c.prio })); }
+    get pages() { return this.banks[1][this.active].pages; }
     describe() { return [{ usagePage: 0xFF00, usage: 0x01, feature: [{ id: 0, bytes: 8 }], input: [], output: [] }]; }
     detectReport() { return { reportId: 0, reportLen: 8, found: true }; }
     hasVendorCollection() { return true; }
@@ -222,14 +228,26 @@
     async _send(bytes) {
       await sleep(4);
       // ---- binary protocol ----
-      if (this.sel != null) { this.pages[this.sel] = bytes.slice(0, 8); this.sel = null; this.pending = new Uint8Array(this.reportLen); return; }
+      const cfg = this.banks[1][this.active];
+      if (this.sel != null) {
+        if (this.sel === 4) { cfg.ct = bytes[1] | (bytes[2] << 8); cfg.prio = bytes[3] & 1; if (cfg.prio) this.banks[1].forEach(c => { if (c !== cfg) c.prio = 0; }); }
+        else cfg.pages[this.sel] = bytes.slice(0, 8);
+        this.sel = null; this.pending = new Uint8Array(this.reportLen); return;
+      }
       if (bytes[0] & 0x80) {
         const c = bytes[0], o = new Uint8Array(this.reportLen);
-        if (c >= 0x80 && c <= 0x82) { this.sel = c & 0x0F; o.set(this.pages[this.sel]); }
+        if (c >= 0x80 && c <= 0x82) { this.sel = c & 0x0F; o.set(cfg.pages[this.sel]); }
+        else if (c === 0x84) { this.sel = 4; o.set([0, cfg.ct & 0xFF, cfg.ct >> 8, cfg.prio]); }
         else if (c === 0x8A) o.set([0, 0, 0x90, 16, 0, 0x01, 0x00, 0]);       // fw 16.9.0, device type 1
         else if (c === 0x8F) o.set(this.cardData);
         else if (c === 0x8E) o.set([this.cardBits, this.cardBits]);
-        else if (c === 0x90) { for (let p = 0; p < 3; p++) if (bytes[1] & (1 << p)) this.eeprom[p] = this.pages[p].slice(); }
+        else if (c === 0x8C && bytes[1] === 0x03) { this._beep(!!(bytes[2] & 0x80)); o.set([0x8C, 0x03]); }
+        else if (c === 0x8C && bytes[1] === 0x06) o.set([0x8C, 0x06, this.volume]);
+        else if (c === 0x8C && bytes[1] === 0x86) { this.volume = bytes[2] & 3; o.set([0x8C, 0x86]); }
+        else if (c === 0x89 && bytes[1] === 0x01) o.set([0x89, 0x01, this.active, this.banks[1].length]);
+        else if (c === 0x89 && bytes[1] === 0x81) { if (bytes[2] < this.banks[1].length) this.active = bytes[2]; o.set([0x89, 0x81, this.active]); }
+        else if (c === 0x89 && bytes[1] === 0x82) { const a = bytes[2], b = bytes[3]; if (this.banks[a] && b !== 3 && this.banks[b]) this.banks[b] = this._cloneBank(this.banks[a]); o.set([0x89, 0x82]); }
+        else if (c === 0x90) { if (bytes[1] & 0x07) this.banks[2] = this._cloneBank(this.banks[1]); }
         this.pending = o; return;
       }
       const cmd = PCX.decodeReply(bytes).text.toUpperCase();

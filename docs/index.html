@@ -65,6 +65,8 @@
       <div class="cfgcol">
         <h4>CONFIGURATION(s)</h4>
         <div id="slots" class="slots"></div>
+        <div class="prio"><label class="inline small">High Priority Card <select id="selPrio"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+          <span class="muted small">Card type and priority per configuration are read from and written to pcProx Plus readers (page 0x84).</span></div>
       </div>
       <button class="hamb" id="btnHamb" title="Menu">☰</button>
       <div class="menu right" id="hambMenu" hidden>
@@ -95,10 +97,15 @@
                 <label class="inline">Data length <input id="inReportLen" type="number" min="8" max="24" value="24" class="w60"></label>
                 <span id="hiRepNote" class="muted small"></span></td></tr>
               <tr><th>Beeper</th><td>
-                <label class="inline">Short <select id="selBeepS"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
+                <label class="inline">Short × <select id="selBeepS"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></label>
                 <button id="btnBeepS" class="btn">Beep</button>
-                <label class="inline">Long <select id="selBeepL"><option>1</option><option>2</option></select></label>
+                <label class="inline">Long × <select id="selBeepL"><option>1</option><option>2</option></select></label>
                 <button id="btnBeepL" class="btn">Beep</button> <span id="beepNote" class="muted small"></span></td></tr>
+              <tr><th>Volume</th><td><select id="selVol"><option value="0">Off</option><option value="1">Low</option><option value="2">Medium</option><option value="3">High</option></select></td></tr>
+              <tr><th>Defaults</th><td>
+                <button id="btnDefSave" class="btn">Save as user defaults</button>
+                <button id="btnDefRestore" class="btn">Restore user defaults</button>
+                <button id="btnDefFactory" class="btn danger">Factory reset</button></td></tr>
             </table>
           </div>
         </div>

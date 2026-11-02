@@ -50,6 +50,8 @@ a{color:var(--acc)}
 .slot.on .num{background:var(--dark);border-color:var(--dark);color:#fff}
 .slot select{flex:1;min-width:0;padding:2px 6px;border-radius:7px;border:1px solid var(--bd);background:#fff;color:var(--mut);font-size:12.5px;height:24px}
 .slot.on select{color:var(--ink)}
+.prio{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.prio select{padding:1px 6px;height:24px;font-size:12.5px}
 .slot .dot{width:12px;height:12px;border-radius:50%;background:#9aa0a6;flex:none}
 .slot.on .dot{background:var(--dark)}
 .slot.filled .dot{box-shadow:0 0 0 2px #fff,0 0 0 3px var(--ok)}

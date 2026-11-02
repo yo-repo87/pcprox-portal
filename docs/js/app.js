@@ -20,6 +20,18 @@
     plan: null, listening: false, pollTimer: null, lastPoll: 0, card: null,
   };
   const slot = () => st.slots[st.active];
+  // Reader configurations: rc[i] = { block, vals, cardType, prio }. pcProx Plus readers have several.
+  st.rc = []; st.plus = null;
+  const viewIdx = () => (st.active < st.rc.length ? st.active : 0);
+  Object.defineProperty(st, 'qrz', {
+    get: () => (st.rc[viewIdx()] || {}).block || null,
+    set: v => { const i = viewIdx(); st.rc[i] = Object.assign(st.rc[i] || {}, { block: v }); },
+  });
+  Object.defineProperty(st, 'readerVals', {
+    get: () => (st.rc[viewIdx()] || {}).vals || {},
+    set: v => { const i = viewIdx(); if (st.rc[i]) st.rc[i].vals = v; },
+  });
+  st.priority = 1;
   const blockCmd = () => (st.protocol === 'bin' ? 'CFG' : 'QRZ');
   const isBin = () => st.protocol === 'bin';
 
@@ -93,7 +105,7 @@
     const feats = reader.describe().flatMap(c => c.feature).map(f => f.bytes).filter(Boolean);
     st.protocol = feats.length && feats.every(n => n > 8) ? 'ascii' : 'bin';
     applyProtocol(false);
-    st.qrz = null; st.fw = ''; st.readerVals = {}; st.plan = null; st.snapshots = []; st.selA = st.selB = null;
+    st.rc = []; st.plus = null; st.fw = ''; st.plan = null; st.snapshots = []; st.selA = st.selB = null;
     if (st.slots[0].src === 'reader') st.slots[0] = newSlot();
 
     $('devEmpty').hidden = true; $('devBody').hidden = false; $('btnKebab').disabled = false;
@@ -120,6 +132,7 @@
     // Read version + configuration on connect, as the vendor utility does (reads only).
     try { await readVersion(); } catch (e) { log(`Version: ${e.message}`, 'warn'); }
     try { await readConfig(); } catch (e) { log(`Configuration: ${e.message}`, 'warn'); }
+    await readVolume();
   }
   // Switch protocol: reload the per-protocol field map and refresh the UI.
   function applyProtocol(reread) {
@@ -132,8 +145,8 @@
       r.reportLen = bin ? 8 : 24; $('inReportLen').value = r.reportLen; updateRep();
       st.map = PCX.loadMap(r.vidpid, st.protocol);
     }
-    $('beepNote').textContent = bin ? 'No beep command is known for the 8-byte protocol.' : '';
-    ['btnBeepS', 'btnBeepL', 'trayBeep'].forEach(id => $(id).disabled = bin);
+    $('beepNote').textContent = '';
+    ['selVol', 'btnDefSave', 'btnDefRestore', 'btnDefFactory'].forEach(id => $(id).disabled = !bin);
     $('snapCmd').innerHTML = (bin ? ['CFG', 'DEV', 'P3', 'P5', 'C8C0', 'C8C1', 'C8C2'] : ['QRZ', 'QSV', 'QDD', 'QS0', 'QUP', 'GS0', 'GL0'])
       .map(c => `<option value="${c}">${SNAP_LABEL[c] || c}</option>`).join('');
     $('fmCmd').value = blockCmd();
@@ -141,7 +154,7 @@
     $('valLabel').textContent = bin ? 'Values read from this reader match the vendor utility (map verified)' : 'Validated on a re-flashable reader';
     $('fmTemplate').disabled = bin; $('fmTemplate').placeholder = bin ? 'not used — the 8-byte protocol writes whole pages' : '(none — writing disabled)';
     $('eeRow').hidden = !bin;
-    st.qrz = null; st.readerVals = {}; st.snapshots = []; st.selA = st.selB = null;
+    st.rc = []; st.plus = null; st.snapshots = []; st.selA = st.selB = null;
     if (st.slots[0].src === 'reader') st.slots[0] = newSlot();
     renderMapUi(); renderSnaps(); renderDiff(); renderQrz(); renderSlots(); renderSettings();
     if (reread && r) { readVersion().catch(e => log(`Version: ${e.message}`, 'warn')).then(() => readConfig()).catch(e => log(`Configuration: ${e.message}`, 'warn')); }
@@ -208,6 +221,11 @@
     $('dvFw').textContent = st.fw || '—';
   }
   const beep = (level, long) => guard(async () => {
+    if (isBin()) {
+      const n = Math.min(long ? 2 : 5, Math.max(1, Number(level()) || 1));
+      await need().bin(PCX.BIN.beep(n, long));
+      return log(`Beep: ${n} ${long ? 'long' : 'short'} (8C 03 ${PCX.hex2(n | (long ? 0x80 : 0))})`);
+    }
     const cmd = PCX.beepCommand(level(), long);
     const res = await need().command(cmd, { pollReads: 2 });
     log(`${cmd} sent${res.text ? ` → ${res.text}` : ''}`);
@@ -216,38 +234,105 @@
   $('btnBeepL').onclick = beep(() => $('selBeepL').value, true);
   $('trayBeep').onclick = beep(() => 1, false);
 
+  // Beeper volume (8C 06 read / 8C 86 set) and memory-bank copies (89 82 src dst) — binary protocol
+  async function readVolume() {
+    if (!isBin() || !st.reader) return;
+    try { const b = await st.reader.bin(PCX.BIN.VOLUME_GET); if (b[2] <= 3) $('selVol').value = String(b[2]); log(`Beeper volume: ${['off', 'low', 'medium', 'high'][b[2]] ?? b[2]}`); }
+    catch (e) { log(`Volume: ${e.message}`, 'warn'); }
+  }
+  $('selVol').onchange = guard(async () => {
+    const v = Number($('selVol').value);
+    await need().bin(PCX.BIN.volumeSet(v));
+    log(`Beeper volume set to ${['off', 'low', 'medium', 'high'][v]}`);
+  });
+  const bankCopy = (pairs, what, warn) => guard(async () => {
+    const r = need();
+    if (!isBin()) throw new Error('Memory-bank commands are only known for the 8-byte protocol');
+    if (!st.plus && !confirm('This reader did not report multiple configurations. The bank-copy command was found on the pcProx Plus path of the vendor library and may not apply. Send anyway?')) return;
+    if (!confirm(`${what}?${warn ? '\n\n' + warn : ''}`)) return;
+    for (const [a, b] of pairs) { const rep = await r.bin(PCX.BIN.blockMove(a, b)); log(`Bank copy ${a}→${b}: ${PCX.toHex(rep)}`); await PCX.sleep(100); }
+    log(`${what}: done`); status(`${what}: done`);
+    st.slots.forEach((sl, i) => { if (sl.src === 'reader') st.slots[i] = newSlot(); });
+    await readConfig();
+  });
+  const B = PCX.BIN.BANK;
+  $('btnDefSave').onclick = bankCopy([[B.WORKING, B.STORED]], 'Save the current configuration as the user defaults');
+  $('btnDefRestore').onclick = bankCopy([[B.STORED, B.WORKING]], 'Restore the saved user defaults', 'Unsaved changes on the reader are replaced.');
+  $('btnDefFactory').onclick = bankCopy([[B.FACTORY, B.STORED], [B.FACTORY, B.WORKING]], 'Reset the reader to FACTORY defaults', 'This replaces the stored user defaults too and cannot be undone. Export a .hwg+ first.');
+
   // ---------- configuration slots ----------
   const fieldsFor = k => st.map.fields.filter(f => f.key === k && f.cmd === blockCmd());
-  function recomputeReaderVals() {
-    st.readerVals = {};
-    if (!st.qrz) return;
+  function valsOf(block) {
+    const v = {};
+    if (!block) return v;
     for (const f of st.map.fields) {
       if (f.cmd !== blockCmd()) continue;
-      const v = PCX.extractField(st.qrz, f);
-      if (v !== undefined) st.readerVals[f.key] = v;
+      const x = PCX.extractField(block, f);
+      if (x !== undefined) v[f.key] = x;
     }
+    return v;
   }
-  async function readBlock() {
-    if (!isBin()) return (await query('QRZ')).bytes;
+  function recomputeReaderVals() { st.rc.forEach(c => { c.vals = valsOf(c.block); }); }
+  async function readPages() {
     const r = need(), out = new Uint8Array(24);
-    status('Reading configuration pages 0–2…');
-    for (const pg of PCX.BIN.PAGES) {
-      const b = await r.bin([PCX.BIN.PAGE(pg)]);
-      out.set(b.slice(0, 8), pg * 8);
-    }
-    log(`Config pages 0–2: ${PCX.toHex(out.slice(0, 8))} | ${PCX.toHex(out.slice(8, 16))} | ${PCX.toHex(out.slice(16))}`);
+    for (const pg of PCX.BIN.PAGES) out.set((await r.bin([PCX.BIN.PAGE(pg)])).slice(0, 8), pg * 8);
     if (out.every(x => x === 0)) throw new Error('Reader returned all-zero configuration pages — it may not speak the 8-byte protocol (try the ASCII protocol on Home)');
     return out;
   }
+  async function selectConfig(i) {
+    const b = await need().bin(PCX.BIN.selectConfig(i));
+    if (!(b[0] === 0x89 && b[1] === 0x81)) log(`Select configuration ${i + 1}: unexpected reply ${PCX.toHex(b)}`, 'warn');
+  }
+  // Reads the block of one configuration (selecting it first on multi-config readers).
+  async function readBlock(cfg = viewIdx()) {
+    if (!isBin()) return (await query('QRZ')).bytes;
+    if (st.plus) await selectConfig(cfg);
+    const out = await readPages();
+    if (st.plus) await selectConfig(st.plus.active);
+    return out;
+  }
   async function readConfig() {
-    st.qrz = await readBlock();
+    if (!isBin()) {
+      st.rc = [{ block: (await query('QRZ')).bytes }];
+    } else {
+      const r = need();
+      // 89 01 -> [89, ?, activeConfig, configCount]: present only on multi-configuration (pcProx Plus) readers
+      const info = await r.bin(PCX.BIN.PLUS_INFO);
+      st.plus = info[0] === 0x89 && info[3] >= 1 && info[3] <= 11 ? { count: info[3], active: Math.min(info[2], info[3] - 1) } : null;
+      log(st.plus ? `Multi-configuration reader: ${st.plus.count} configurations, active ${st.plus.active + 1}` : 'Single-configuration reader');
+      status('Reading configuration…');
+      st.rc = [];
+      const n = st.plus ? st.plus.count : 1;
+      for (let i = 0; i < n; i++) {
+        if (st.plus) await selectConfig(i);
+        const block = await readPages();
+        let cardType = null, prio = 0;
+        if (st.plus) {
+          const p4 = await r.bin([PCX.BIN.PAGE(4)]);
+          cardType = p4[1] | (p4[2] << 8); prio = p4[3] & 1;
+        }
+        st.rc.push({ block, cardType, prio });
+        log(`Config ${i + 1}${cardType != null ? ` (${cardTypeName(cardType)}${prio ? ', high priority' : ''})` : ''}: ${PCX.toHex(block.slice(0, 8))} | ${PCX.toHex(block.slice(8, 16))} | ${PCX.toHex(block.slice(16))}`);
+      }
+      if (st.plus) await selectConfig(st.plus.active);
+    }
     recomputeReaderVals();
-    const s0 = st.slots[0];
-    if (!s0.src || s0.src === 'reader') { st.slots[0] = { ...newSlot(), src: 'reader', label: 'Reader configuration', targets: { ...st.readerVals } }; }
-    else for (const [k, v] of Object.entries(st.readerVals)) if (!(k in s0.targets)) s0.targets[k] = v;
+    st.rc.forEach((c, i) => {
+      if (i >= st.slots.length) return;
+      const sl = st.slots[i];
+      if (!sl.src || sl.src === 'reader') st.slots[i] = readerSlot(i);
+      else for (const [k, v] of Object.entries(c.vals)) if (!(k in sl.targets)) sl.targets[k] = v;
+    });
+    const hp = st.rc.findIndex(c => c.prio);
+    if (hp >= 0) st.priority = hp + 1;
     renderQrz(); renderSlots(); renderSettings(); renderPresetTable();
-    log(`Read configuration: ${st.qrz.length} bytes, ${Object.keys(st.readerVals).length} mapped setting(s)`);
-    status(`Read ${st.qrz.length}-byte configuration`);
+    log(`Read ${st.rc.length} configuration(s), ${Object.keys(st.rc[0].vals).length} mapped setting(s) each`);
+    status(`Read ${st.rc.length} configuration(s)`);
+  }
+  function readerSlot(i) {
+    const c = st.rc[i];
+    const label = `Reader${st.rc.length > 1 ? ` #${i + 1}` : ''}${c.cardType != null ? ` · ${(window.PCX_CARD_TYPES || {})[Number(c.cardType).toString(16).toUpperCase().padStart(4, '0')] || 'card type ' + c.cardType}` : ''}`;
+    return { ...newSlot(), src: 'reader', label, targets: { ...c.vals }, cardType: c.cardType, cardPriority: c.prio };
   }
   $('trayRead').onclick = guard(readConfig);
 
@@ -258,9 +343,12 @@
   };
   function slotOptions(i) {
     const o = ['<option value="">— empty —</option>'];
-    if (i === 0) o.push(`<option value="reader">Reader configuration${st.qrz ? '' : ' (not read yet)'}</option>`);
+    if (i < Math.max(1, st.rc.length)) o.push(`<option value="reader">${st.rc[i] ? esc(readerSlot(i).label) : 'Reader configuration (not read yet)'}</option>`);
+    const types = Object.entries(window.PCX_CARD_TYPES || {}).sort((a, b) => a[1].localeCompare(b[1]));
+    if (types.length) o.push('<optgroup label="Card type (no settings)">' + types.map(([h, n]) => `<option value="t:${h}">${esc(n)}</option>`).join('') + '</optgroup><optgroup label="Presets">');
     st.lib.forEach((p, li) => p.parsed.configs.forEach((c, ci) =>
       o.push(`<option value="p:${li}:${ci}">${esc(p.label)}${p.parsed.configs.length > 1 ? ` · #${ci + 1}` : ''}${c.cardType != null ? ` · ${esc(cardTypeName(c.cardType))}` : ''}</option>`)));
+    if (types.length) o.push('</optgroup>');
     return o.join('');
   }
   function renderSlots() {
@@ -274,11 +362,19 @@
       setSlot(i, sel.value);
       st.active = i; renderSlots(); renderSettings();
     });
-    $$('.slotlbl').forEach(el => el.textContent = `— configuration ${st.active + 1}${slot().label ? `: ${slot().label}` : ' (empty)'}${st.active ? ' · not writable yet' : ''}`);
+    $('selPrio').value = String(st.priority);
+    $$('.slotlbl').forEach(el => el.textContent = `— configuration ${st.active + 1}${slot().label ? `: ${slot().label}` : ' (empty)'}${st.active >= Math.max(1, st.rc.length) ? ' · not on this reader' : ''}`);
   }
+  $('selPrio').onchange = () => { st.priority = Number($('selPrio').value); log(`High priority card: configuration ${st.priority}`); };
   function setSlot(i, src) {
     if (!src) { st.slots[i] = newSlot(); return; }
-    if (src === 'reader') { st.slots[i] = { ...newSlot(), src, label: 'Reader configuration', targets: { ...st.readerVals } }; return; }
+    if (src === 'reader') { st.slots[i] = st.rc[i] ? readerSlot(i) : { ...newSlot(), src, label: 'Reader configuration', targets: {} }; return; }
+    if (src.startsWith('t:')) {
+      const h = src.slice(2), keep = st.slots[i].targets;
+      st.slots[i] = { ...newSlot(), src, label: (window.PCX_CARD_TYPES || {})[h] || h, targets: keep, cardType: parseInt(h, 16) };
+      log(`Configuration ${i + 1} card type ← ${st.slots[i].label} (${h})`);
+      return;
+    }
     const [, li, ci] = src.split(':').map(Number);
     const p = st.lib[li], c = p.parsed.configs[ci];
     const targets = {};
@@ -291,7 +387,7 @@
   function settingCard(s) {
     const sl = slot();
     const fl = fieldsFor(s.key);
-    const rv = st.active === 0 ? st.readerVals[s.key] : undefined;
+    const rv = st.rc[st.active] ? st.rc[st.active].vals[s.key] : undefined;
     const tv = sl.targets[s.key];
     const changed = rv !== undefined && tv !== undefined && Number(tv) !== Number(rv);
     const chr = PCX.CHAR_KEYS.includes(s.key) && tv !== undefined ? `key: ${esc(PCX.scancodeName(Number(tv)))}` : null;
@@ -339,7 +435,7 @@
     $('writeModal').hidden = false;
   }
   $('btnWrite').onclick = guard(async () => {
-    if (st.reader && !st.qrz) {
+    if (st.reader && !st.rc.length) {
       status('Reading configuration before write…');
       try { await readConfig(); } catch (e) { log(`Configuration: ${e.message}`, 'err'); }
     }
@@ -347,36 +443,49 @@
     const mapped = st.map.fields.filter(f => f.cmd === blockCmd()).length;
     const checks = [
       { ok: !!st.reader, text: st.reader ? `Reader connected (${st.reader.name})` : 'No reader connected — press Connect first' },
-      { ok: !!st.qrz, text: st.qrz ? `Configuration read (${st.qrz.length} bytes)` : 'Configuration could not be read — check the log in Test Area' },
+      { ok: st.rc.length > 0, text: st.rc.length ? `Configuration read (${st.rc.length} configuration${st.rc.length > 1 ? 's' : ''})` : 'Configuration could not be read — check the log in Test Area' },
       { ok: mapped > 0, text: mapped ? `${mapped} setting(s) mapped to reader bytes${bin ? ' (built-in map)' : ''}` : 'No settings are mapped to reader bytes yet — capture and diff in Tools → Mapping workbench' },
     ];
     if (!bin) checks.push({ ok: !!st.map.writeTemplate, text: st.map.writeTemplate ? `Write template: ${st.map.writeTemplate}` : 'No write template set (Tools → Mapping workbench, step 4)' });
     checks.push({ ok: !!st.map.writeValidated, text: st.map.writeValidated ? (bin ? 'Map marked as verified against the vendor utility' : 'Write template marked as validated')
       : (bin ? 'Map not yet verified: compare the values on Timing/Format with the vendor utility, then tick the box in Tools → Mapping workbench' : 'Write template not marked as validated on a spare reader') });
-    if (!st.reader || !st.qrz || !mapped) return showWriteBlocked(checks);
-    const s0 = st.slots[0];
-    const changed = {};
-    for (const [k, v] of Object.entries(s0.targets)) if (fieldsFor(k).length && st.readerVals[k] !== undefined && Number(v) !== Number(st.readerVals[k])) changed[k] = v;
-    const unwritable = Object.keys(s0.targets).filter(k => !fieldsFor(k).length && s0.targets[k] !== undefined);
-    const lines = [`Target: configuration 1 (${s0.label || 'empty'})`];
-    let plan = null;
-    if (!Object.keys(changed).length) lines.push('', 'No mapped setting differs from the reader — nothing to write.');
-    else {
-      plan = bin ? PCX.planBinWrite(st.map, st.qrz, changed, $('chkEeprom').checked) : PCX.planWrite(st.map, st.qrz, changed);
-      lines.push('', `Settings: ${plan.applied.map(k => `${k} ${st.readerVals[k]} → ${changed[k]}`).join(', ')}`, '', 'Byte changes:');
-      plan.diffs.forEach(d => lines.push(`  ${bin ? `page ${Math.floor(d.byte / 8)} pos ${d.byte % 8}` : `byte ${String(d.byte).padStart(2)}`}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
-      lines.push('', bin ? 'Feature reports (8 bytes each):' : 'Commands:');
-      if (!bin && !st.map.writeTemplate) lines.push('  (none — set a write template in Tools → Mapping workbench)');
-      plan.commands.forEach(c => lines.push(`  ${c}${bin ? '' : '<CR>'}`));
+    if (!st.reader || !st.rc.length || !mapped) return showWriteBlocked(checks);
+
+    const lines = [], parts = [];
+    const n = bin ? st.rc.length : 1;
+    for (let i = 0; i < n && i < st.slots.length; i++) {
+      const sl = st.slots[i], rc = st.rc[i];
+      const changed = {};
+      for (const [k, v] of Object.entries(sl.targets)) if (fieldsFor(k).length && rc.vals[k] !== undefined && Number(v) !== Number(rc.vals[k])) changed[k] = v;
+      const wantCt = st.plus && sl.cardType != null ? sl.cardType : rc.cardType;
+      const wantPrio = st.plus ? (st.priority === i + 1 ? 1 : 0) : rc.prio;
+      const ctChange = !!st.plus && (wantCt !== rc.cardType || wantPrio !== rc.prio);
+      if (!Object.keys(changed).length && !ctChange) continue;
+      const plan = !Object.keys(changed).length ? null : bin ? PCX.planBinWrite(st.map, rc.block, changed, $('chkEeprom').checked) : PCX.planWrite(st.map, rc.block, changed);
+      const pre = ctChange ? [PCX.binCmd([PCX.BIN.PAGE(PCX.BIN.CARD_PAGE)]), PCX.binCmd([0, wantCt & 0xFF, (wantCt >> 8) & 0xFF, wantPrio])] : [];
+      parts.push({ i, plan, pre, wantCt, wantPrio });
+      lines.push(`Configuration ${i + 1}${st.plus ? ` (${cardTypeName(rc.cardType)})` : ''}:`);
+      if (ctChange) lines.push(`  card type ${cardTypeName(rc.cardType)}${rc.prio ? ' [high]' : ''} → ${cardTypeName(wantCt)}${wantPrio ? ' [high]' : ''}`);
+      if (plan) {
+        lines.push(`  settings: ${plan.applied.map(k => `${k} ${rc.vals[k]} → ${changed[k]}`).join(', ')}`);
+        plan.diffs.forEach(d => lines.push(`  ${bin ? `page ${Math.floor(d.byte / 8)} pos ${d.byte % 8}` : `byte ${d.byte}`}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
+      }
+      const reps = [...(st.plus ? [PCX.toHex(PCX.binCmd(PCX.BIN.selectConfig(i))) + '   (select configuration)'] : []), ...pre.map(r => PCX.toHex(r)), ...(plan ? plan.commands : [])];
+      if (!bin && !st.map.writeTemplate) lines.push('  (no commands — set a write template in Tools → Mapping workbench)');
+      reps.forEach(c => lines.push(`    ${c}${bin ? '' : '<CR>'}`));
+      lines.push('');
     }
-    if (unwritable.length) lines.push('', `Not writable (no known byte): ${unwritable.length} setting(s) — ${unwritable.slice(0, 10).join(', ')}${unwritable.length > 10 ? '…' : ''}`);
-    const others = st.slots.slice(1).filter(s => s.src).length;
-    if (others) lines.push('', `Configurations 2–4 (${others} filled) are not written: the command that selects a configuration slot is not known yet.`);
-    st.plan = plan;
+    if (!parts.length) lines.push('No mapped setting, card type or priority differs from the reader — nothing to write.');
+    const unwritable = [...new Set(st.slots.flatMap(sl => Object.keys(sl.targets).filter(k => !fieldsFor(k).length)))];
+    if (unwritable.length) lines.push('', `Not writable (no known byte): ${unwritable.slice(0, 10).join(', ')}${unwritable.length > 10 ? '…' : ''}`);
+    const extra = st.slots.slice(n).filter(x => x.src).length;
+    if (extra) lines.push('', `${extra} filled slot(s) beyond the reader's ${n} configuration(s) are not written.`);
+    st.plan = parts.length ? { parts } : null;
     $('planOut').textContent = lines.join('\n');
-    const ok = !!(plan && plan.commands.length && st.map.writeValidated);
+    const nCmds = parts.reduce((t, p) => t + p.pre.length + (p.plan ? p.plan.commands.length : 0), 0);
+    const ok = !!(nCmds && st.map.writeValidated && (bin || st.map.writeTemplate));
     $('btnExecWrite').disabled = !ok;
-    $('planNote').textContent = !plan ? '' : (!bin && !st.map.writeTemplate) ? 'Writing is disabled until a write template is set.'
+    $('planNote').textContent = !parts.length ? '' : (!bin && !st.map.writeTemplate) ? 'Writing is disabled until a write template is set.'
       : !st.map.writeValidated ? (bin ? 'Writing is disabled until you confirm the read values match the vendor utility (Tools → Mapping workbench).' : 'Writing is disabled until the template is marked as validated.')
       : 'After writing, the reader is re-read and every changed byte is verified.';
     $('writeModal').hidden = false;
@@ -385,30 +494,42 @@
   $('btnPlanCancel').onclick = () => { $('writeModal').hidden = true; };
   $('btnExecWrite').onclick = guard(async () => {
     const plan = st.plan; const r = need();
-    if (!plan || !plan.commands.length) return;
-    if (!confirm(`Send ${plan.commands.length} ${isBin() ? 'feature report(s)' : 'write command(s)'} to ${r.name}? These readers control physical access.`)) return;
+    if (!plan) return;
+    if (!confirm(`Write ${plan.parts.length} configuration(s) to ${r.name}? These readers control physical access.`)) return;
     $('btnExecWrite').disabled = true;
     status('Writing…');
-    if (isBin()) { await r.binSequence(plan.reports); plan.commands.forEach(c => log(`WRITE ${c}`)); }
-    else for (const c of plan.commands) {
-      const res = await r.command(c, { pollReads: 3 });
-      log(`WRITE ${c} → ${res.text || '(no reply)'}`);
+    for (const p of plan.parts) {
+      if (isBin()) {
+        if (st.plus) await selectConfig(p.i);
+        const reps = [...p.pre, ...(p.plan ? p.plan.reports : [])];
+        await r.binSequence(reps);
+        reps.forEach(x => log(`WRITE cfg ${p.i + 1}: ${PCX.toHex(x)}`));
+      } else for (const c of p.plan.commands) {
+        const res = await r.command(c, { pollReads: 3 });
+        log(`WRITE ${c} → ${res.text || '(no reply)'}`);
+      }
     }
-    const want = plan.next;
-    st.slots[0].src = 'reader';
+    if (isBin() && st.plus) await selectConfig(st.plus.active);
+    plan.parts.forEach(p => { const sl = st.slots[p.i]; if (sl) sl.src = 'reader'; });
     await readConfig();
-    const bad = plan.diffs.filter(d => st.qrz[d.byte] !== want[d.byte]);
+    const bad = [];
+    for (const p of plan.parts) {
+      const rc = st.rc[p.i];
+      if (p.plan) p.plan.diffs.forEach(d => { if (rc.block[d.byte] !== p.plan.next[d.byte]) bad.push(`cfg ${p.i + 1} byte ${d.byte} (want ${PCX.hex2(p.plan.next[d.byte])}, got ${PCX.hex2(rc.block[d.byte] ?? 0)})`); });
+      if (p.pre.length && (rc.cardType !== p.wantCt || rc.prio !== p.wantPrio)) bad.push(`cfg ${p.i + 1} card type/priority`);
+    }
     $('writeModal').hidden = true;
-    if (bad.length) log(`Verify FAILED on byte(s) ${bad.map(d => `${d.byte} (want ${PCX.hex2(want[d.byte])}, got ${PCX.hex2(st.qrz[d.byte] ?? 0)})`).join(', ')}`, 'err');
+    if (bad.length) log(`Verify FAILED: ${bad.join(', ')}`, 'err');
     else {
-      log(`Verified: all ${plan.diffs.length} changed byte(s) read back correctly${isBin() && !$('chkEeprom').checked ? ' (not saved to EEPROM — lost on unplug)' : ''}`);
+      log(`Verified: ${plan.parts.length} configuration(s) read back correctly${isBin() && !$('chkEeprom').checked ? ' (not saved to EEPROM — lost on unplug)' : ''}`);
       status('Write verified');
-      if (!isBin()) r.command(PCX.beepCommand(1, false), { pollReads: 1 }).catch(() => {});
+      if (isBin()) r.bin(PCX.BIN.beep(1, false)).catch(() => {});
+      else r.command(PCX.beepCommand(1, false), { pollReads: 1 }).catch(() => {});
     }
   });
 
   // ---------- card reading (Test Area) ----------
-  const s0val = (k, d) => st.slots[0].targets[k] ?? st.readerVals[k] ?? d;
+  const s0val = (k, d) => st.slots[0].targets[k] ?? (st.rc[0] && st.rc[0].vals[k]) ?? d;
   function handleCard(bytes, src, bitsOverride) {
     const now = performance.now();
     const ex = PCX.extractCardId(bytes, st.map.layout);
@@ -536,10 +657,12 @@
   function slotSettings(i) {
     const s = st.slots[i], out = {}, fromTargets = [];
     for (const d of PCX.SETTINGS) {
-      if (i === 0 && st.readerVals[d.key] !== undefined) out[d.key] = st.readerVals[d.key];
-      else if (s.targets[d.key] !== undefined) { out[d.key] = s.targets[d.key]; if (i === 0) fromTargets.push(d.key); }
+      const rv = st.rc[i] && s.src === 'reader' ? st.rc[i].vals[d.key] : undefined;
+      if (rv !== undefined) out[d.key] = rv;
+      else if (s.targets[d.key] !== undefined) { out[d.key] = s.targets[d.key]; if (s.src === 'reader') fromTargets.push(d.key); }
     }
-    return { settings: out, fromTargets, cardType: s.cardType, cardPriority: s.cardPriority, fldSepData: s.fldSepData || null };
+    const cardPriority = s.cardType != null ? (st.priority === i + 1 ? 1 : 0) : s.cardPriority;
+    return { settings: out, fromTargets, cardType: s.cardType, cardPriority, fldSepData: s.fldSepData || null };
   }
   function exportHwg(allSlots) {
     const idx = allSlots ? st.slots.map((s, i) => (s.src ? i : -1)).filter(i => i >= 0) : [st.active];
@@ -584,14 +707,14 @@
   $('btnSnap').onclick = guard(async () => {
     const cmd = $('snapCmd').value;
     let p;
-    if (cmd === 'CFG') { const b = await readBlock(); p = { bytes: b, text: PCX.toHex(b) }; }
+    if (cmd === 'CFG') { const b = await readBlock(viewIdx()); p = { bytes: b, text: PCX.toHex(b) }; }
     else if (isBin()) {
       const code = cmd === 'DEV' ? [PCX.BIN.DEVINFO] : PCX.BIN.EXTRA[cmd];
       const b = await need().bin(code); p = { bytes: b, text: PCX.toHex(b) };
     } else p = await query(cmd);
     const snap = { id: ++st.snapSeq, cmd, label: $('snapLabel').value.trim() || `${cmd} #${st.snapSeq}`, bytes: p.bytes || new Uint8Array(0), text: p.text, time: new Date().toISOString() };
     st.snapshots.push(snap);
-    if (cmd === blockCmd()) { st.qrz = snap.bytes; recomputeReaderVals(); renderQrz(); renderSettings(); }
+    if (cmd === blockCmd() && st.rc.length) { st.qrz = snap.bytes; recomputeReaderVals(); renderQrz(); renderSettings(); }
     if (st.selA == null) st.selA = snap.id; else st.selB = snap.id;
     $('snapLabel').value = '';
     renderSnaps(); renderDiff();
@@ -647,8 +770,7 @@
     st.map.fields = st.map.fields.filter(x => !(x.key === f.key && x.cmd === f.cmd && x.byte === f.byte));
     st.map.fields.push(f);
     persistMap(); recomputeReaderVals();
-    const s0 = st.slots[0];
-    for (const [k, v] of Object.entries(st.readerVals)) if (!(k in s0.targets)) s0.targets[k] = v;
+    st.rc.forEach((c, i) => { const sl = st.slots[i]; if (sl) for (const [k, v] of Object.entries(c.vals)) if (!(k in sl.targets)) sl.targets[k] = v; });
     refreshAll();
     log(`Mapped ${f.key} → ${f.cmd} byte ${f.byte}${f.width === 2 ? '-' + (f.byte + 1) : ''} mask ${hx(f.mask)} >>${f.shift}`);
     $('fmNote').value = '';
@@ -743,5 +865,6 @@
 
   applyProtocol(false);
   loadLibrary();
+  window.PCX_STATE = st; // for troubleshooting from the browser console
   log('Portal ready. Connect a reader, or try the simulated reader.');
 })();

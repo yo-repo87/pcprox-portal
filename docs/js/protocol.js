@@ -145,6 +145,20 @@
     // extra read-only queries seen in the open-source tool (meaning unconfirmed)
     EXTRA: { P3: [0x83], P5: [0x85], C8C0: [0x8C, 0x01, 0x00], C8C1: [0x8C, 0x01, 0x01], C8C2: [0x8C, 0x01, 0x02] },
   };
+  // Recovered from pcProxAPI.dll (BeepNow, SetBeeperVolume, GetBeeperVolume, PlusBlockMove,
+  // SetActConfig/WriteCfg, the card-type writer and the multi-config detector). Data bytes exclude the report id.
+  Object.assign(PCX.BIN, {
+    beep: (n, long) => [0x8C, 0x03, (Math.min(long ? 2 : 5, Math.max(1, n | 0))) | (long ? 0x80 : 0)],
+    VOLUME_GET: [0x8C, 0x06],                       // reply data[2] = 0 off, 1 low, 2 medium, 3 high
+    volumeSet: lvl => [0x8C, 0x86, lvl & 3],
+    PLUS_INFO: [0x89, 0x01],                        // reply [0x89, ?, activeConfig, configCount] on pcProx Plus
+    selectConfig: i => [0x89, 0x81, i & 0xFF],      // reply echoes [0x89, 0x81]
+    CARD_PAGE: 4,                                   // page 4 = [00, cardType lo, cardType hi, priority]
+    // copy a whole memory bank: 1 = working, 2 = stored (user defaults), 3 = factory
+    blockMove: (src, dst) => [0x89, 0x82, src & 7, dst & 7, 0x00, 0xFF],
+    BANK: { WORKING: 1, STORED: 2, FACTORY: 3 },
+    // 0x90 finish mask bits seen in the DLL: 01 p0, 02 p1, 04 p2, 08 p3, 20 p5, 80 LUID
+  });
   PCX.binCmd = bytes => { const o = new Uint8Array(8); o.set(Array.from(bytes).slice(0, 8)); return o; };
   // Device info reply: [?, ?, {minor:4, release:4}, major, ?, deviceType(LE16), ?]
   PCX.decodeDevInfo = b => {
