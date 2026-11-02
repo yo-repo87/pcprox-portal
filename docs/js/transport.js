@@ -211,7 +211,7 @@
       // pcProx Plus-like: 4 configurations (card types as on the user's RDR-805x), each with pages 0..2
       // Page values taken from the user's RDR-805x raw dump (vendor-programmed state).
       const H = s => Uint8Array.from(s.split(' ').map(x => parseInt(x, 16)));
-      const mk = (p0, p1, p2, p3, ct) => ({ pages: [H(p0), H(p1), H(p2), H(p3)], ct, prio: 1 });
+      const mk = (p0, p1, p2, p3, ct) => ({ pages: [H(p0), H(p1), H(p2), H(p3)], ct, prio: 1, fs: new Uint8Array(144) });
       this.banks = { 1: [
         mk('03 05 00 14 5D B3 28 10', '00 14 14 18 05 05 42 C0', '02 9A 00 00 00 00 00 00', '00 00 00 00 00 02 00 01', 0xEF01),
         mk('03 0E 00 10 1A B3 28 11', '00 14 14 18 05 05 42 C0', '02 9A 00 00 00 00 00 00', '00 00 00 00 00 00 00 00', 0xF802),
@@ -222,7 +222,7 @@
       this.active = 0; this.volume = 2;
       this.sel = null; this.cardData = new Uint8Array(8); this.cardBits = 0;
     }
-    _cloneBank(b) { return b.map(c => ({ pages: c.pages.map(p => p.slice()), ct: c.ct, prio: c.prio })); }
+    _cloneBank(b) { return b.map(c => ({ pages: c.pages.map(p => p.slice()), ct: c.ct, prio: c.prio, fs: c.fs.slice() })); }
     get pages() { return this.banks[1][this.active].pages; }
     describe() { return [{ usagePage: 0xFF00, usage: 0x01, feature: [{ id: 0, bytes: 8 }], input: [], output: [] }]; }
     detectReport() { return { reportId: 0, reportLen: 8, found: true }; }
@@ -236,13 +236,15 @@
       // ---- binary protocol ----
       const cfg = this.banks[1][this.active];
       if (this.sel != null) {
-        if (this.sel === 4) { cfg.pend4 = { ct: bytes[1] | (bytes[2] << 8), prio: bytes[3] & 1 }; } // applied on 0x90, like the real RDR-805x
+        if (typeof this.sel === 'string') { const n = Number(this.sel.slice(3)); cfg.fs.set(bytes.slice(0, 8), n * 8); cfg.pendFs = true; }
+        else if (this.sel === 4) { cfg.pend4 = { ct: bytes[1] | (bytes[2] << 8), prio: bytes[3] & 1 }; } // applied on 0x90, like the real RDR-805x
         else cfg.pages[this.sel] = bytes.slice(0, 8);
         this.sel = null; this.pending = new Uint8Array(this.reportLen); return;
       }
       if (bytes[0] & 0x80) {
         const c = bytes[0], o = new Uint8Array(this.reportLen);
         if (c >= 0x80 && c <= 0x83) { this.sel = c & 0x0F; o.set(cfg.pages[this.sel]); }
+        else if (c === 0x85 && bytes[3] === 0x10 && bytes[1] < 18) { this.sel = 'fs:' + bytes[1]; o.set(cfg.fs.slice(bytes[1] * 8, bytes[1] * 8 + 8)); }
         else if (c === 0x84) { this.sel = 4; o.set([0, cfg.ct & 0xFF, cfg.ct >> 8, cfg.prio]); }
         else if (c === 0x8A) o.set([0, 0, 0x90, 0x16, 0, 0x01, 0x05, 0]);   // fw 16.9.0 (as in the user's dump)
         else if (c === 0x8F) o.set(this.cardData);

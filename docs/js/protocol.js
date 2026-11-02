@@ -157,6 +157,10 @@
     // copy a whole memory bank: 1 = working, 2 = stored (user defaults), 3 = factory
     blockMove: (src, dst) => [0x89, 0x82, src & 7, dst & 7, 0x00, 0xFF],
     BANK: { WORKING: 1, STORED: 2, FACTORY: 3 },
+    // Extended-Mode field/separator table (.hwg+ "sFldSepData"): 18 blocks of 8 bytes per configuration.
+    // Select block n with [85 n 00 10], then GET it or SET its 8 data bytes; finish with 90 mask 0x20.
+    FLDSEP_BLOCKS: 18,
+    fldSep: n => [0x85, n & 0xFF, 0x00, 0x10],
     // 0x90 finish mask bits seen in the DLL: 01 p0, 02 p1, 04 p2, 08 p3, 20 p5, 80 LUID
   });
   PCX.binCmd = bytes => { const o = new Uint8Array(8); o.set(Array.from(bytes).slice(0, 8)); return o; };
@@ -226,12 +230,20 @@
       else if ((m = line.match(/^Tx:\s*(.*)$/i))) lastTx = PCX.hexToBytes(m[1]);
       else if ((m = line.match(/^Rx:\s*(.*)$/i)) && lastTx) {
         if (!cur) { cur = { index: 0, pages: {} }; out.configs.push(cur); }
-        cur.pages[lastTx[0]] = PCX.hexToBytes(m[1]).slice(0, 8);
+        const rx = PCX.hexToBytes(m[1]).slice(0, 8);
+        if (lastTx[0] === 0x85 && lastTx[3] === 0x10) (cur.fldSep = cur.fldSep || {})[lastTx[1]] = rx; // portal extension
+        else cur.pages[lastTx[0]] = rx;
         lastTx = null;
       }
     }
     if (!out.configs.length) throw new Error('No "Tx:/Rx:" feature reports found — is this a raw-data dump from the vendor utility?');
     return out;
+  };
+
+  // .hwg+ sFldSepData text -> bytes (all hex pairs in order; comment lines start with '/').
+  PCX.fldSepBytes = text => {
+    const hex = String(text || '').split('\n').filter(l => !/^\s*\//.test(l)).join(' ').match(/[0-9a-f]{2}/gi) || [];
+    return Uint8Array.from(hex.map(h => parseInt(h, 16)));
   };
 
   // ---------- Card ID helpers ----------

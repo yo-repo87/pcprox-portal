@@ -102,3 +102,15 @@ Portal changes:
 - Page 3 is now part of the configuration block (pages 0–3), and `iExOutputFormat` is mapped to page 3, byte 7.
 - Page 84 byte 3 is preserved.
 - **Write dump to reader** restores both.
+
+## Extended-Mode field layout (sFldSepData): not in the vendor dump
+
+After **Write dump to reader**, config 1 matched the vendor dump byte for byte, yet the output was `193` ↵ `10475` instead of `0000000140450726`.
+
+- **Why:** Extended Mode (page 83 byte 7 = 1) formats the output with a per-configuration field/separator table. This is the `sFldSepData` block in `.hwg+` files. The vendor's raw dump never reads that table: it sends only `85 00 …`.
+- **How the DLL handles it:** the table is 18 blocks of 8 bytes. Select a block with `85 nn 00 10`, then GET it or SET its 8 bytes, and finish with `90` mask `0x20`.
+- **Portal changes:**
+  - It reads the table for every configuration.
+  - Its raw dumps include it as extra `85 nn 00 10` lines.
+  - The compare/restore view handles it.
+  - Loading a `.hwg+` preset with `sFldSepData` writes that layout.

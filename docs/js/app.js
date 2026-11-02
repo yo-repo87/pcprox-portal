@@ -312,7 +312,13 @@
           p4 = await r.bin([PCX.BIN.PAGE(4)]);
           cardType = p4[1] | (p4[2] << 8); prio = p4[3] & 1;
         }
-        st.rc.push({ block, cardType, prio, p3, p4 });
+        let fs = null;
+        if (st.plus) {
+          fs = new Uint8Array(PCX.BIN.FLDSEP_BLOCKS * 8);
+          for (let n = 0; n < PCX.BIN.FLDSEP_BLOCKS; n++) fs.set((await r.bin(PCX.BIN.fldSep(n))).slice(0, 8), n * 8);
+        }
+        st.rc.push({ block, cardType, prio, p3, p4, fs });
+        if (fs) log(`Config ${i + 1} field layout (sFldSepData): ${PCX.toHex(fs.slice(0, 32))}${fs.slice(32).some(x => x) ? ' …' : ''}`);
         log(`Config ${i + 1}${cardType != null ? ` (${cardTypeName(cardType)}, priority ${prio})` : ''}: ${[0, 1, 2, 3].map(q => PCX.toHex(block.slice(q * 8, q * 8 + 8))).join(' | ')}`);
       }
       if (st.plus) await selectConfig(st.plus.active);
@@ -461,19 +467,31 @@
       const wantCt = st.plus && sl.cardType != null ? sl.cardType : rc.cardType;
       const wantPrio = rc.prio; // preserved: meaning of page 84 byte 3 unconfirmed (vendor sets 1 on all configs)
       const ctChange = !!st.plus && wantCt !== rc.cardType;
-      if (!Object.keys(changed).length && !ctChange) continue;
+      // Extended-Mode field layout from a .hwg+ preset (sFldSepData)
+      let fsReps = [];
+      if (st.plus && rc.fs && sl.fldSepData && sl.src && sl.src.startsWith('p:')) {
+        const src = PCX.fldSepBytes(sl.fldSepData), want = Uint8Array.from(rc.fs);
+        want.set(src.slice(0, want.length), 0);
+        for (let b = 0; b < Math.ceil(Math.min(src.length, want.length) / 8); b++) {
+          const w = want.slice(b * 8, b * 8 + 8);
+          if (PCX.toHex(w) !== PCX.toHex(rc.fs.slice(b * 8, b * 8 + 8))) fsReps.push(PCX.binCmd(PCX.BIN.fldSep(b)), PCX.binCmd(w));
+        }
+        if (fsReps.length) fsReps.push(PCX.binCmd([PCX.BIN.FINISH, $('chkEeprom').checked ? 0x20 : 0]));
+      }
+      if (!Object.keys(changed).length && !ctChange && !fsReps.length) continue;
       const plan = !Object.keys(changed).length ? null : bin ? PCX.planBinWrite(st.map, rc.block, changed, $('chkEeprom').checked) : PCX.planWrite(st.map, rc.block, changed);
       const p4 = rc.p4 ? Uint8Array.from(rc.p4) : PCX.binCmd([0, 0, 0, wantPrio]);
       p4[1] = wantCt & 0xFF; p4[2] = (wantCt >> 8) & 0xFF;
       const pre = ctChange ? [PCX.binCmd([PCX.BIN.PAGE(PCX.BIN.CARD_PAGE)]), p4] : [];
-      parts.push({ i, plan, pre, wantCt, wantPrio });
+      parts.push({ i, plan, pre, wantCt, wantPrio, fsReps });
       lines.push(`Configuration ${i + 1}${st.plus ? ` (${cardTypeName(rc.cardType)})` : ''}:`);
       if (ctChange) lines.push(`  card type ${cardTypeName(rc.cardType)} → ${cardTypeName(wantCt)}`);
+      if (fsReps.length) lines.push(`  field layout (sFldSepData): ${(fsReps.length - 1) / 2} block(s) from the preset`);
       if (plan) {
         lines.push(`  settings: ${plan.applied.map(k => `${k} ${rc.vals[k]} → ${changed[k]}`).join(', ')}`);
         plan.diffs.forEach(d => lines.push(`  ${bin ? `page ${Math.floor(d.byte / 8)} pos ${d.byte % 8}` : `byte ${d.byte}`}: ${PCX.hex2(d.a)} → ${PCX.hex2(d.b)}`));
       }
-      const reps = [...(st.plus ? [PCX.toHex(PCX.binCmd(PCX.BIN.selectConfig(i))) + '   (select configuration)'] : []), ...pre.map(r => PCX.toHex(r)), ...(plan ? plan.commands : [PCX.toHex(PCX.binCmd([PCX.BIN.FINISH, 0]))])];
+      const reps = [...(st.plus ? [PCX.toHex(PCX.binCmd(PCX.BIN.selectConfig(i))) + '   (select configuration)'] : []), ...pre.map(r => PCX.toHex(r)), ...(plan ? plan.commands : pre.length ? [PCX.toHex(PCX.binCmd([PCX.BIN.FINISH, 0]))] : []), ...fsReps.map(r => PCX.toHex(r))];
       if (!bin && !st.map.writeTemplate) lines.push('  (no commands — set a write template in Tools → Mapping workbench)');
       reps.forEach(c => lines.push(`    ${c}${bin ? '' : '<CR>'}`));
       lines.push('');
@@ -485,7 +503,7 @@
     if (extra) lines.push('', `${extra} filled slot(s) beyond the reader's ${n} configuration(s) are not written.`);
     st.plan = parts.length ? { parts } : null;
     $('planOut').textContent = lines.join('\n');
-    const nCmds = parts.reduce((t, p) => t + p.pre.length + (p.plan ? p.plan.commands.length : 0), 0);
+    const nCmds = parts.reduce((t, p) => t + p.pre.length + p.fsReps.length + (p.plan ? p.plan.commands.length : 0), 0);
     const ok = !!(nCmds && st.map.writeValidated && (bin || st.map.writeTemplate));
     $('btnExecWrite').disabled = !ok;
     $('planNote').textContent = !parts.length ? '' : (!bin && !st.map.writeTemplate) ? 'Writing is disabled until a write template is set.'
@@ -516,7 +534,7 @@
     for (const p of plan.parts) {
       if (isBin()) {
         if (st.plus) await selectConfig(p.i);
-        const reps = [...p.pre, ...(p.plan ? p.plan.reports : [PCX.binCmd([PCX.BIN.FINISH, 0])])];
+        const reps = [...p.pre, ...(p.plan ? p.plan.reports : p.pre.length ? [PCX.binCmd([PCX.BIN.FINISH, 0])] : []), ...(p.fsReps || [])];
         await r.binSequence(reps);
         reps.forEach(x => log(`WRITE cfg ${p.i + 1}: ${PCX.toHex(x)}`));
       } else for (const c of p.plan.commands) {
@@ -532,6 +550,10 @@
       const rc = st.rc[p.i];
       if (p.plan) p.plan.diffs.forEach(d => { if (rc.block[d.byte] !== p.plan.next[d.byte]) bad.push(`cfg ${p.i + 1} byte ${d.byte} (want ${PCX.hex2(p.plan.next[d.byte])}, got ${PCX.hex2(rc.block[d.byte] ?? 0)})`); });
       if (p.pre.length && rc.cardType !== p.wantCt) bad.push(`cfg ${p.i + 1} card type`);
+      for (let k = 0; k + 1 < (p.fsReps || []).length; k += 2) {
+        const b = p.fsReps[k][1], w = p.fsReps[k + 1];
+        if (!rc.fs || PCX.toHex(rc.fs.slice(b * 8, b * 8 + 8)) !== PCX.toHex(w)) bad.push(`cfg ${p.i + 1} layout block ${b}`);
+      }
     }
     $('writeModal').hidden = true;
     if (bad.length) log(`Verify FAILED: ${bad.join(', ')}`, 'err');
@@ -652,7 +674,7 @@
     const p = st.lib[li], cfg = p.parsed.configs[0];
     const warn = [];
     if (cfg.legacy) warn.push('Legacy positional .hwg: the position→setting mapping is a best guess (first 19 positions). Remaining positions are kept raw and not applied.');
-    if (p.parsed.configs.some(c => c.fldSepData)) warn.push('Contains field-separator data (sFldSepData). No confirmed command writes it, so it is not applied.');
+    if (p.parsed.configs.some(c => c.fldSepData)) warn.push('Contains Extended-Mode field layouts (sFldSepData). They are written to multi-configuration (pcProx Plus) readers along with the slot, using the vendor library\'s 85 nn 00 10 block command.');
     if (p.parsed.configs.length > 1) warn.push(`${p.parsed.configs.length} configurations (card types) — loaded into consecutive slots. Only slot 1 can be written.`);
     $('presetWarn').innerHTML = warn.map(esc).join('<br>'); $('presetWarn').hidden = !warn.length;
     const rows = Object.entries(cfg.settings).map(([k, v]) => {
@@ -682,11 +704,17 @@
   function dumpDiffs() {
     const out = [];
     if (!st.dump) return out;
-    for (const c of st.dump.configs) for (const code of DUMP_PAGES) {
-      const want = c.pages[code]; if (!want) continue;
-      const have = readerPage(c.index, code);
-      const differs = !have || PCX.toHex(have) !== PCX.toHex(want);
-      out.push({ cfg: c.index, code, want, have, differs });
+    for (const c of st.dump.configs) {
+      for (const code of DUMP_PAGES) {
+        const want = c.pages[code]; if (!want) continue;
+        const have = readerPage(c.index, code);
+        const differs = !have || PCX.toHex(have) !== PCX.toHex(want);
+        out.push({ cfg: c.index, code, want, have, differs });
+      }
+      for (const [b, want] of Object.entries(c.fldSep || {})) {
+        const rc = st.rc[c.index], have = rc && rc.fs ? rc.fs.slice(b * 8, b * 8 + 8) : null;
+        out.push({ cfg: c.index, code: 'FS', blk: Number(b), want, have, differs: !have || PCX.toHex(have) !== PCX.toHex(want) });
+      }
     }
     return out;
   }
@@ -696,15 +724,17 @@
     const d = dumpDiffs(), n = d.filter(x => x.differs).length;
     $('dumpMeta').textContent = `${st.dump.name} · ${st.dump.readerType || ''} · ${st.dump.configs.length} configuration(s) · ${st.rc.length ? `${n} page(s) differ from the reader` : 'connect and read the reader to compare'}`;
     const setDiff = x => {
+      if (x.code === 'FS') return '';
       if (x.code > 0x83 || !x.have) return x.code === 0x84 && x.have && x.have[3] !== x.want[3] ? `priority ${x.have[3]}→${x.want[3]}` : '';
       const a = new Uint8Array(32), b = new Uint8Array(32), off = (x.code - 0x80) * 8;
       a.set(x.have, off); b.set(x.want, off);
       const va = valsOf(a), vb = valsOf(b);
       return Object.keys(vb).filter(k => st.map.fields.some(f => f.key === k && f.cmd === 'CFG' && Math.floor(f.byte / 8) === x.code - 0x80) && va[k] !== vb[k]).map(k => `${k} ${va[k]}→${vb[k]}`).join(', ');
     };
-    $('dumpTable').tBodies[0].innerHTML = d.map(x => `<tr class="${x.differs && st.rc.length ? 'chg' : ''}"><td>${x.cfg + 1}</td><td class="mono">${PCX.hex2(x.code)}</td>
+    if (!st.dump.configs.some(c => c.fldSep)) $('dumpMeta').textContent += ' · no field-layout blocks in this file (vendor dumps leave them out; save a dump from the portal to include them)';
+    $('dumpTable').tBodies[0].innerHTML = d.map(x => `<tr class="${x.differs && st.rc.length ? 'chg' : ''}"><td>${x.cfg + 1}</td><td class="mono">${x.code === 'FS' ? `85·${PCX.hex2(x.blk)}` : PCX.hex2(x.code)}</td>
       <td class="mono">${PCX.toHex(x.want)}</td><td class="mono">${x.have ? PCX.toHex(x.have) : '—'}</td>
-      <td class="small">${x.code === 0x84 ? esc(cardTypeName(x.want[1] | (x.want[2] << 8))) + (setDiff(x) ? ' · ' + esc(setDiff(x)) : '') : esc(setDiff(x))}</td></tr>`).join('');
+      <td class="small">${x.code === 'FS' ? 'field layout' : x.code === 0x84 ? esc(cardTypeName(x.want[1] | (x.want[2] << 8))) + (setDiff(x) ? ' · ' + esc(setDiff(x)) : '') : esc(setDiff(x))}</td></tr>`).join('');
     $('btnDumpWrite').disabled = !(st.reader && isBin() && st.rc.length && n);
   }
   $('btnDumpWrite').onclick = guard(async () => {
@@ -714,13 +744,14 @@
     if (!d.length) return log('Reader already matches the dump');
     const byCfg = {};
     d.forEach(x => (byCfg[x.cfg] = byCfg[x.cfg] || []).push(x));
-    const summary = Object.entries(byCfg).map(([c, xs]) => `config ${Number(c) + 1}: pages ${xs.map(x => PCX.hex2(x.code)).join(', ')}`).join('\n');
+    const summary = Object.entries(byCfg).map(([c, xs]) => `config ${Number(c) + 1}: ${xs.map(x => (x.code === 'FS' ? `layout ${x.blk}` : PCX.hex2(x.code))).join(', ')}`).join('\n');
     if (!confirm(`Write the dump's exact bytes to ${r.name}?\n\n${summary}\n\nThese readers control physical access.`)) return;
     for (const [c, xs] of Object.entries(byCfg)) {
       const i = Number(c);
       if (st.plus) await selectConfig(i);
       const reps = []; let mask = 0;
       for (const x of xs) {
+        if (x.code === 'FS') { reps.push(PCX.binCmd(PCX.BIN.fldSep(x.blk)), PCX.binCmd(x.want)); mask |= 0x20; continue; }
         reps.push(PCX.binCmd([x.code]), PCX.binCmd(x.want));
         if (x.code <= 0x83) mask |= 1 << (x.code - 0x80);
       }
@@ -735,7 +766,7 @@
     await readConfig();
     const left = dumpDiffs().filter(x => x.differs && x.cfg < st.rc.length);
     renderDump();
-    if (left.length) log(`Restore verify: ${left.length} page(s) still differ (${left.map(x => `cfg ${x.cfg + 1} ${PCX.hex2(x.code)}`).join(', ')})`, 'err');
+    if (left.length) log(`Restore verify: ${left.length} page(s) still differ (${left.map(x => `cfg ${x.cfg + 1} ${x.code === 'FS' ? 'layout ' + x.blk : PCX.hex2(x.code)}`).join(', ')})`, 'err');
     else { log('Restore verified: the reader matches the dump'); status('Reader matches the dump'); r.bin(PCX.BIN.beep(1, false)).catch(() => {}); }
   });
 
@@ -793,6 +824,12 @@
       if (st.plus) L.push(`# Configuration ${i + 1}`);
       for (const c of codes) {
         const tx = PCX.binCmd([c]);
+        const rx = await r.bin(tx);
+        L.push(`Tx: ${PCX.toHex(tx)} `, `Rx: ${PCX.toHex(rx)} `);
+      }
+      // Portal extension (not in the vendor dump): Extended-Mode field layout blocks 85 nn 00 10
+      if (st.plus) for (let b = 0; b < PCX.BIN.FLDSEP_BLOCKS; b++) {
+        const tx = PCX.binCmd(PCX.BIN.fldSep(b));
         const rx = await r.bin(tx);
         L.push(`Tx: ${PCX.toHex(tx)} `, `Rx: ${PCX.toHex(rx)} `);
       }
