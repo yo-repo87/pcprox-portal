@@ -86,3 +86,19 @@ The vendor utility's dump of the RDR-805x confirms the 8-byte protocol:
   - Config 1 has data in page 83: `00 00 00 00 00 02 00 01`.
   - Page 81 byte 7 is `C0` on every config.
   - The portal preserves these bytes on writes, and the raw-dump restore writes them exactly.
+
+## Portal dump vs vendor dump (output 25317846 vs 0000000140450726)
+
+Pages 80–82 matched on all four configurations. The only differences were:
+
+- **Config 1, page 83:** portal `00 00 00 00 00 00 00 00`, vendor `00 00 00 00 00 02 00 01`.
+  - The DLL's page-3 writer puts `tsIDDispParms.iExOutputFormat` in byte 7 (0 = Data Format Mode, 1 = Extended Mode).
+  - Extended Mode gives the 16-digit `0000000140450726`. Data Format Mode gives `25317846`.
+  - Byte 5 (`02`) is a further flag bit (meaning unconfirmed).
+- **Page 84, byte 3, all configs:** portal `00`, vendor `01`. `GetCardPriority` reads this byte, so it is the per-config card priority flag. The vendor sets it to 1 on all four.
+
+Portal changes:
+
+- Page 3 is now part of the configuration block (pages 0–3), and `iExOutputFormat` is mapped to page 3, byte 7.
+- Page 84 byte 3 is preserved.
+- **Write dump to reader** restores both.

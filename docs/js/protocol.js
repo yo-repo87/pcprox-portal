@@ -137,7 +137,7 @@
   PCX.BIN = {
     REPORT_LEN: 8,
     PAGE: p => 0x80 | p,     // select config page p for read (then GET) or write (then SET data)
-    PAGES: [0, 1, 2],        // documented, writable pages
+    PAGES: [0, 1, 2, 3],     // config pages read/written as one 32-byte block (page 3 = extended settings)
     DEVINFO: 0x8A,           // device / firmware info
     CARD_DATA: 0x8F,         // card read buffer 0 (ID bytes, little-endian, parity stripped)
     CARD_INFO: 0x8E,         // card read buffer 1 (byte 0 = bit count of buffer 0)
@@ -188,8 +188,11 @@
     F('iCrdGnChr0', 2, 2, 0xFF), F('iCrdGnChr1', 2, 3, 0xFF),
     F('iLeadChrCnt', 2, 4, 0x0F), F('iTrailChrCnt', 2, 4, 0xF0, 4),
     F('iLeadChr0', 2, 5, 0xFF), F('iLeadChr1', 2, 6, 0xFF), F('iLeadChr2', 2, 7, 0xFF),
+    // Page 3, from pcProxAPI.dll's page-3 packer: byte 7 = tsIDDispParms.iExOutputFormat
+    // (0 = Data Format Mode, 1 = Extended Mode). Confirmed by the RDR-805x dump: vendor config 1 has 01 here.
+    { ...F('iExOutputFormat', 3, 7, 0xFF), note: 'built-in (pcProxAPI.dll page-3 writer; confirmed by RDR-805x dump)' },
   ];
-  // Not in the binary map: AZERTYShiftlock, ExtendedPrecisionMath, iExOutputFormat, bNotBootDev, bLowerCaseHex
+  // Not in the binary map: AZERTYShiftlock, ExtendedPrecisionMath, bNotBootDev, bLowerCaseHex
   // (location unknown), iTrailChr0..2 (share the iLeadChr bytes, offset by iLeadChrCnt).
 
   // Character fields (iFACIDDelim, iELDelim, lead/trail/gone chars) are USB HID keyboard

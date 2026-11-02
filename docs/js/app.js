@@ -150,7 +150,7 @@
     $('snapCmd').innerHTML = (bin ? ['CFG', 'DEV', 'P3', 'P5', 'C8C0', 'C8C1', 'C8C2'] : ['QRZ', 'QSV', 'QDD', 'QS0', 'QUP', 'GS0', 'GL0'])
       .map(c => `<option value="${c}">${SNAP_LABEL[c] || c}</option>`).join('');
     $('fmCmd').value = blockCmd();
-    $('blkName').textContent = bin ? 'Configuration pages 0–2 (byte = page × 8 + position)' : 'QRZ block';
+    $('blkName').textContent = bin ? 'Configuration pages 0–3 (byte = page × 8 + position)' : 'QRZ block';
     $('valLabel').textContent = bin ? 'Values read from this reader match the vendor utility (map verified)' : 'Validated on a re-flashable reader';
     $('fmTemplate').disabled = bin; $('fmTemplate').placeholder = bin ? 'not used — the 8-byte protocol writes whole pages' : '(none — writing disabled)';
     $('eeRow').hidden = !bin;
@@ -159,7 +159,7 @@
     renderMapUi(); renderSnaps(); renderDiff(); renderQrz(); renderSlots(); renderSettings();
     if (reread && r) { readVersion().catch(e => log(`Version: ${e.message}`, 'warn')).then(() => readConfig()).catch(e => log(`Configuration: ${e.message}`, 'warn')); }
   }
-  const SNAP_LABEL = { CFG: 'Config pages 0–2', DEV: 'Device info (0x8A)', P3: 'Page 3 (0x83)', P5: 'Page 5 (0x85)', C8C0: '0x8C 01 00', C8C1: '0x8C 01 01', C8C2: '0x8C 01 02' };
+  const SNAP_LABEL = { CFG: 'Config pages 0–3', DEV: 'Device info (0x8A)', P3: 'Page 3 (0x83)', P5: 'Page 5 (0x85)', C8C0: '0x8C 01 00', C8C1: '0x8C 01 01', C8C2: '0x8C 01 02' };
   $('selProto').onchange = () => { stopListening(); st.protocol = $('selProto').value; log(`Protocol set to ${st.protocol === 'bin' ? 'binary 8-byte' : 'ASCII 24-byte'}`); applyProtocol(true); };
   async function detach(silent) {
     stopListening();
@@ -274,7 +274,7 @@
   }
   function recomputeReaderVals() { st.rc.forEach(c => { c.vals = valsOf(c.block); }); }
   async function readPages() {
-    const r = need(), out = new Uint8Array(24);
+    const r = need(), out = new Uint8Array(PCX.BIN.PAGES.length * 8);
     for (const pg of PCX.BIN.PAGES) out.set((await r.bin([PCX.BIN.PAGE(pg)])).slice(0, 8), pg * 8);
     if (out.every(x => x === 0)) throw new Error('Reader returned all-zero configuration pages — it may not speak the 8-byte protocol (try the ASCII protocol on Home)');
     return out;
@@ -313,7 +313,7 @@
           cardType = p4[1] | (p4[2] << 8); prio = p4[3] & 1;
         }
         st.rc.push({ block, cardType, prio, p3, p4 });
-        log(`Config ${i + 1}${cardType != null ? ` (${cardTypeName(cardType)}, flag ${prio})` : ''}: ${PCX.toHex(block.slice(0, 8))} | ${PCX.toHex(block.slice(8, 16))} | ${PCX.toHex(block.slice(16))}`);
+        log(`Config ${i + 1}${cardType != null ? ` (${cardTypeName(cardType)}, priority ${prio})` : ''}: ${[0, 1, 2, 3].map(q => PCX.toHex(block.slice(q * 8, q * 8 + 8))).join(' | ')}`);
       }
       if (st.plus) await selectConfig(st.plus.active);
     }
@@ -674,7 +674,7 @@
   });
   function readerPage(i, code) {
     const rc = st.rc[i]; if (!rc) return null;
-    if (code <= 0x82) return rc.block ? rc.block.slice((code - 0x80) * 8, (code - 0x80) * 8 + 8) : null;
+    if (code <= 0x83 && rc.block && rc.block.length >= (code - 0x7F) * 8) return rc.block.slice((code - 0x80) * 8, (code - 0x80) * 8 + 8);
     if (code === 0x83) return rc.p3 || null;
     if (code === 0x84) return rc.p4 || null;
     return null;
@@ -696,15 +696,15 @@
     const d = dumpDiffs(), n = d.filter(x => x.differs).length;
     $('dumpMeta').textContent = `${st.dump.name} · ${st.dump.readerType || ''} · ${st.dump.configs.length} configuration(s) · ${st.rc.length ? `${n} page(s) differ from the reader` : 'connect and read the reader to compare'}`;
     const setDiff = x => {
-      if (x.code > 0x82 || !x.have) return '';
-      const a = new Uint8Array(24), b = new Uint8Array(24), off = (x.code - 0x80) * 8;
+      if (x.code > 0x83 || !x.have) return x.code === 0x84 && x.have && x.have[3] !== x.want[3] ? `priority ${x.have[3]}→${x.want[3]}` : '';
+      const a = new Uint8Array(32), b = new Uint8Array(32), off = (x.code - 0x80) * 8;
       a.set(x.have, off); b.set(x.want, off);
       const va = valsOf(a), vb = valsOf(b);
       return Object.keys(vb).filter(k => st.map.fields.some(f => f.key === k && f.cmd === 'CFG' && Math.floor(f.byte / 8) === x.code - 0x80) && va[k] !== vb[k]).map(k => `${k} ${va[k]}→${vb[k]}`).join(', ');
     };
     $('dumpTable').tBodies[0].innerHTML = d.map(x => `<tr class="${x.differs && st.rc.length ? 'chg' : ''}"><td>${x.cfg + 1}</td><td class="mono">${PCX.hex2(x.code)}</td>
       <td class="mono">${PCX.toHex(x.want)}</td><td class="mono">${x.have ? PCX.toHex(x.have) : '—'}</td>
-      <td class="small">${x.code === 0x84 ? esc(cardTypeName(x.want[1] | (x.want[2] << 8))) : esc(setDiff(x))}</td></tr>`).join('');
+      <td class="small">${x.code === 0x84 ? esc(cardTypeName(x.want[1] | (x.want[2] << 8))) + (setDiff(x) ? ' · ' + esc(setDiff(x)) : '') : esc(setDiff(x))}</td></tr>`).join('');
     $('btnDumpWrite').disabled = !(st.reader && isBin() && st.rc.length && n);
   }
   $('btnDumpWrite').onclick = guard(async () => {
