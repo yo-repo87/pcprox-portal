@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pcProx Reader Portal</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>pcProx Reader Portal</h1>
+  <div id="conn" class="pill off">Helper: not connected</div>
+</header>
+
+<main>
+  <section class="card" id="pair">
+    <h2>1. Connect to local helper</h2>
+    <p class="muted">Run <code>start-helper.bat</code> on this PC, then enter the pairing code it shows. Use Chrome or Edge.</p>
+    <div class="row">
+      <input id="code" placeholder="Pairing code" maxlength="16" autocomplete="off">
+      <input id="port" value="8765" size="5" title="Helper port">
+      <button id="btnPair">Pair</button>
+    </div>
+    <p id="pairMsg" class="muted"></p>
+    <details><summary>Browser USB detection (WebHID, read-only)</summary>
+      <p class="muted">Lists rf IDEAS USB devices the browser can see. Configuration is never written through this path.</p>
+      <button id="btnHid" class="secondary">Detect readers in browser</button>
+      <pre id="hidOut"></pre>
+    </details>
+  </section>
+
+  <section class="card" id="devs" hidden>
+    <h2>2. Reader</h2>
+    <div class="row"><button id="btnScan">Scan for readers</button><select id="devSel"></select></div>
+    <table id="devTable"><thead><tr><th>#</th><th>Part</th><th>Firmware</th><th>LUID</th><th>VID:PID</th></tr></thead><tbody></tbody></table>
+    <div class="row">
+      <button id="btnBeep" class="secondary">Beep</button>
+      <button id="btnId" class="secondary">Read card ID</button>
+      <button id="btnFw" class="secondary">Firmware info</button>
+    </div>
+    <pre id="info"></pre>
+  </section>
+
+  <section class="card" id="cfg" hidden>
+    <h2>3. Configure</h2>
+    <div class="tabs"><button data-t="presets" class="on">Presets &amp; files</button><button data-t="settings">Settings</button><button data-t="defaults">Defaults</button></div>
+
+    <div id="t-presets" class="tab">
+      <div class="row"><select id="presetSel"></select><button id="btnPreset">Program reader with preset</button></div>
+      <div class="row"><input type="file" id="file" accept=".hwg,.hwg+,.txt"><button id="btnFile">Program reader with file</button></div>
+      <div class="row"><button id="btnExport" class="secondary">Export reader config (.hwg)</button></div>
+    </div>
+
+    <div id="t-settings" class="tab" hidden>
+      <div class="row"><button id="btnRead" class="secondary">Read from reader</button><input id="filter" placeholder="Filter settings…"><button id="btnWrite">Write changed settings</button></div>
+      <div id="grid" class="grid"></div>
+    </div>
+
+    <div id="t-defaults" class="tab" hidden>
+      <p class="muted">These change the reader's stored configuration.</p>
+      <div class="row"><button id="btnSaveUser" class="secondary">Save current as user defaults</button><button id="btnFactory" class="danger">Reset to factory defaults</button></div>
+    </div>
+  </section>
+
+  <section class="card"><h2>Log</h2><pre id="log"></pre></section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
