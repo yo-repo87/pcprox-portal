@@ -15,11 +15,10 @@
 <main>
   <section class="card" id="pair">
     <h2>1. Connect to local helper</h2>
-    <p class="muted">Run <code>start-helper.bat</code> on this PC, then enter the pairing code it shows. Use Chrome or Edge.</p>
+    <p class="muted">Run <code>start-helper.bat</code> on this PC and keep its window open. This page connects automatically. Use Chrome or Edge.</p>
     <div class="row">
-      <input id="code" placeholder="Pairing code" maxlength="16" autocomplete="off">
       <input id="port" value="8765" size="5" title="Helper port">
-      <button id="btnPair">Pair</button>
+      <button id="btnPair">Connect now</button>
     </div>
     <p id="pairMsg" class="muted"></p>
     <details><summary>Browser USB detection (WebHID, read-only)</summary>
